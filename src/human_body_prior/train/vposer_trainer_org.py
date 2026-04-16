@@ -100,6 +100,7 @@ class VPoserTrainer(LightningModule):
         self.vp_model = VPoser(vp_ps)
 
         with torch.no_grad():
+
             self.bm_train = BodyModel(vp_ps.body_model.bm_fname)
 
         if vp_ps.logging.render_during_training:
@@ -192,23 +193,21 @@ class VPoserTrainer(LightningModule):
         q_z = drec['q_z']
         # dorig['fullpose'] = torch.cat([dorig['root_orient'], dorig['pose_body']], dim=-1)
 
-        # Reconstruction loss - L1 on the output mesh (input mesh vs output mesh)
+        # Reconstruction loss - L1 on the output mesh
         with torch.no_grad():
             bm_orig = self.bm_train(pose_body=dorig['pose_body'])
 
         bm_rec = self.bm_train(pose_body=drec['pose_body'].contiguous().view(bs, -1))
 
-        # remove calculation since we are not doing mesh loss, only JTr loss
-        # v2v = l1_loss(bm_rec.v, bm_orig.v)
+        v2v = l1_loss(bm_rec.v, bm_orig.v)
 
-
-        # KL loss (this enforces unit sphere (?) distribution for VAE... deviation of q_z (encoded latent) from p_z (preferred distribution)
+        # KL loss
         p_z = torch.distributions.normal.Normal(
             loc=torch.zeros((bs, latentD), device=device, requires_grad=False),
             scale=torch.ones((bs, latentD), device=device, requires_grad=False))
         weighted_loss_dict = {
-            'loss_kl':loss_kl_wt * torch.mean(torch.sum(torch.distributions.kl.kl_divergence(q_z, p_z), dim=[1])) #,
-            # 'loss_mesh_rec': loss_rec_wt * v2v
+            'loss_kl':loss_kl_wt * torch.mean(torch.sum(torch.distributions.kl.kl_divergence(q_z, p_z), dim=[1])),
+            'loss_mesh_rec': loss_rec_wt * v2v
         }
 
         if (self.current_epoch < self.vp_ps.train_parms.keep_extra_loss_terms_until_epoch):
@@ -218,20 +217,17 @@ class VPoserTrainer(LightningModule):
 
         weighted_loss_dict['loss_total'] = torch.stack(list(weighted_loss_dict.values())).sum()
 
-        # with torch.no_grad():
-        #     # unweighted_loss_dict = {'v2v': torch.sqrt(torch.pow(bm_rec.v-bm_orig.v, 2).sum(-1)).mean()}
-        #     unweighted_loss_dict = {}
-        #     unweighted_loss_dict['loss_total'] = torch.cat(
-        #         list({k: v.view(-1) for k, v in unweighted_loss_dict.items()}.values()), dim=-1).sum().view(1)
+        with torch.no_grad():
+            unweighted_loss_dict = {'v2v': torch.sqrt(torch.pow(bm_rec.v-bm_orig.v, 2).sum(-1)).mean()}
+            unweighted_loss_dict['loss_total'] = torch.cat(
+                list({k: v.view(-1) for k, v in unweighted_loss_dict.items()}.values()), dim=-1).sum().view(1)
 
-        return {'weighted_loss': weighted_loss_dict}
-        # return {'weighted_loss': weighted_loss_dict, 'unweighted_loss': unweighted_loss_dict}
+        return {'weighted_loss': weighted_loss_dict, 'unweighted_loss': unweighted_loss_dict}
 
     def training_step(self, batch, batch_idx):
-        # process the data
-        drec = self(batch['pose_body'].view(-1, 63))        # batch is incoming data (axis angle), drec is reconstructed data
-        # out_pose = drec['pose_body'][0]
-        # in_pose = batch['pose_body'][0].view(21, -1)
+
+        drec = self(batch['pose_body'].view(-1, 63))
+
         loss = self._compute_loss(batch, drec)
 
         train_loss = loss['weighted_loss']['loss_total']
@@ -245,7 +241,7 @@ class VPoserTrainer(LightningModule):
         drec = self(batch['pose_body'].view(-1, 63))
 
         loss = self._compute_loss(batch, drec)
-        val_loss = loss['weighted_loss']['loss_total']
+        val_loss = loss['unweighted_loss']['loss_total']
 
         if self.renderer is not None and self.global_rank == 0 and batch_idx % 500==0 and np.random.rand()>0.5:
             out_fname = makepath(self.work_dir, 'renders/vald_rec_E{:03d}_It{:04d}_val_loss_{:.2f}.png'.format(self.current_epoch, batch_idx, val_loss.item()), isfile=True)
@@ -363,5 +359,5 @@ def train_vposer_once(_config):
                          # resume_from_checkpoint=resume_from_checkpoint
                          )
 
+    # trainer.fit(model, ckpt_path='/Users/bmolab/Dev/human_body_prior/support_data/training/training_experiments/V02_07/snapshots/V02_07_epoch=07_val_loss=0.00.ckpt')
     trainer.fit(model)
-    # trainer.fit(model, ckpt_path='/Users/drokeby/Dev/human_body_prior_/support_data/training/training_experiments/V02_07/snapshots/V02_07_epoch=00_val_loss=0.00.ckpt')
