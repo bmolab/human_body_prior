@@ -169,7 +169,7 @@ class VPoserTrainer(LightningModule):
         schedulers = [
             {
                 'scheduler': gen_lr_scheduler,
-                'monitor': 'lr-Adam',
+                'monitor': 'val_loss',
                 'interval': 'epoch',
                 'frequency': 1
             },
@@ -246,6 +246,7 @@ class VPoserTrainer(LightningModule):
 
         loss = self._compute_loss(batch, drec)
         val_loss = loss['weighted_loss']['loss_total']
+        self.log('val_loss', val_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
 
         if self.renderer is not None and self.global_rank == 0 and batch_idx % 500==0 and np.random.rand()>0.5:
             out_fname = makepath(self.work_dir, 'renders/vald_rec_E{:03d}_It{:04d}_val_loss_{:.2f}.png'.format(self.current_epoch, batch_idx, val_loss.item()), isfile=True)

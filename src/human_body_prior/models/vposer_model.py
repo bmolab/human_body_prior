@@ -73,7 +73,10 @@ def axis_angle_to_6d(axis_angle: torch.Tensor) -> torch.Tensor:
     if len(matrix.shape) == 2:
         matrix = matrix.unsqueeze(0)
     batch_dim = matrix.size()[:-2]
-    return matrix[..., :2, :].clone().reshape(batch_dim + (6,))
+    
+    # Fix: Use the first two rotation-matrix columns. 
+    # ContinuousRotReprDecoder reshapes 6D values as [3, 2] and treats them as two 3D column vectors.
+    return matrix[..., :, :2].clone().reshape(batch_dim + (6,))
 
 
 class ContinuousRotReprDecoder(nn.Module):
