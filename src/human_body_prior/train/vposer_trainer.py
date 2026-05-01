@@ -24,8 +24,10 @@
 # from pytorch_lightning import Trainer
 
 import glob
+import inspect
 import os
 import os.path as osp
+import subprocess
 from datetime import datetime as dt
 from typing import Any
 
@@ -49,6 +51,7 @@ from human_body_prior.tools.omni_tools import log2file
 from human_body_prior.tools.omni_tools import make_deterministic
 from human_body_prior.tools.omni_tools import makepath
 from human_body_prior.tools.rotation_tools import aa2matrot
+from human_body_prior.tools.loss_history import LossHistoryRecorder, plot_loss_history
 from human_body_prior.visualizations.training_visualization import vposer_trainer_renderer
 from pytorch_lightning.callbacks import LearningRateMonitor
 from pytorch_lightning.callbacks.early_stopping import EarlyStopping
@@ -94,6 +97,7 @@ class VPoserTrainer(LightningModule):
 
         self._log_prefix = '[{}]'.format(self.expr_id)
         self.text_logger = log2file(prefix=self._log_prefix)
+        self.loss_history = LossHistoryRecorder(self.work_dir, logger=self.text_logger)
 
         self.seq_len = vp_ps.data_parms.num_timeseq_frames
 
@@ -137,14 +141,27 @@ class VPoserTrainer(LightningModule):
         self.train_starttime = dt.now().replace(microsecond=0)
 
         ######## make a backup of vposer
-        git_repo_dir = os.path.abspath(__file__).split('/')
-        git_repo_dir = '/'.join(git_repo_dir[:git_repo_dir.index('human_body_prior') + 1])
+        git_repo_dir = os.path.abspath(__file__)
+        while True:
+            if os.path.isdir(os.path.join(git_repo_dir, '.git')):
+                break
+            parent = os.path.dirname(git_repo_dir)
+            if parent == git_repo_dir:
+                git_repo_dir = os.getcwd()
+                break
+            git_repo_dir = parent
         starttime = dt.strftime(self.train_starttime, '%Y_%m_%d_%H_%M_%S')
         archive_path = makepath(self.work_dir, 'code', 'vposer_{}.tar.gz'.format(starttime), isfile=True)
-        cmd = 'cd %s && git ls-files -z | xargs -0 tar -czf %s' % (git_repo_dir, archive_path)
-        os.system(cmd)
+        try:
+            subprocess.run(
+                ['git', '-C', git_repo_dir, 'archive', '--format=tar.gz', '-o', archive_path, 'HEAD'],
+                check=True,
+            )
+        except Exception as exc:
+            self.text_logger('Skipping git archive backup: {}'.format(exc))
         ########
-        self.text_logger('Created a git archive backup at {}'.format(archive_path))
+        if osp.exists(archive_path):
+            self.text_logger('Created a git archive backup at {}'.format(archive_path))
         dump_config(self.vp_ps, osp.join(self.work_dir, '{}.yaml'.format(self.expr_id)))
 
     def train_dataloader(self):
@@ -164,7 +181,10 @@ class VPoserTrainer(LightningModule):
 
         lr_sched_class = getattr(lr_sched_module, self.vp_ps.train_parms.lr_scheduler.type)
 
-        gen_lr_scheduler = lr_sched_class(gen_optimizer, **self.vp_ps.train_parms.lr_scheduler.args)
+        lr_scheduler_args = self.vp_ps.train_parms.lr_scheduler.args.toDict()
+        scheduler_sig = inspect.signature(lr_sched_class.__init__)
+        lr_scheduler_args = {k: v for k, v in lr_scheduler_args.items() if k in scheduler_sig.parameters}
+        gen_lr_scheduler = lr_sched_class(gen_optimizer, **lr_scheduler_args)
 
         schedulers = [
             {
@@ -233,6 +253,8 @@ class VPoserTrainer(LightningModule):
         # out_pose = drec['pose_body'][0]
         # in_pose = batch['pose_body'][0].view(21, -1)
         loss = self._compute_loss(batch, drec)
+        self.loss_history.update('train', loss['weighted_loss'])
+        self._log_loss_components('train', loss['weighted_loss'])
 
         train_loss = loss['weighted_loss']['loss_total']
 
@@ -245,6 +267,9 @@ class VPoserTrainer(LightningModule):
         drec = self(batch['pose_body'].view(-1, 63))
 
         loss = self._compute_loss(batch, drec)
+        if not self._is_sanity_checking():
+            self.loss_history.update('vald', loss['weighted_loss'])
+        self._log_loss_components('vald', loss['weighted_loss'])
         val_loss = loss['weighted_loss']['loss_total']
         self.log('val_loss', val_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
 
@@ -258,6 +283,36 @@ class VPoserTrainer(LightningModule):
 
         progress_bar = {'v2v': val_loss}
         return {'val_loss': c2c(val_loss), 'progress_bar': progress_bar, 'log': progress_bar}
+
+    def _log_loss_components(self, split_name, weighted_loss):
+        for loss_name, loss_value in weighted_loss.items():
+            self.log(
+                '{}/{}'.format(split_name, loss_name),
+                loss_value.detach(),
+                on_step=False,
+                on_epoch=True,
+                prog_bar=False,
+                logger=True,
+            )
+
+    def on_train_epoch_start(self):
+        self.loss_history.reset('train')
+
+    def on_validation_epoch_start(self):
+        if not self._is_sanity_checking():
+            self.loss_history.reset('vald')
+
+    @rank_zero_only
+    def on_train_epoch_end(self):
+        self.loss_history.write_epoch('train', self.current_epoch)
+
+    @rank_zero_only
+    def on_validation_epoch_end(self):
+        if not self._is_sanity_checking():
+            self.loss_history.write_epoch('vald', self.current_epoch)
+
+    def _is_sanity_checking(self):
+        return getattr(self.trainer, 'sanity_checking', False)
 
     def on_train_batch_end(self, outputs: STEP_OUTPUT, batch: Any, batch_idx: int) -> None:
         loss = outputs['loss'].item()
@@ -295,9 +350,15 @@ class VPoserTrainer(LightningModule):
 
         self.text_logger('Epoch {} - Finished training at {} after {}'.format(self.current_epoch, endtime, elapsedtime))
         self.text_logger('best_model_fname: {}'.format(self.vp_ps.logging.best_model_fname))
+        try:
+            plot_path = plot_loss_history(self.loss_history.csv_path)
+            self.text_logger('loss_history_plot: {}'.format(plot_path))
+        except Exception as exc:
+            self.text_logger('Could not plot loss history: {}'.format(exc))
 
         dump_config(self.vp_ps, osp.join(self.work_dir, '{}_{}.yaml'.format(self.expr_id, self.dataset_id)))
-        self.hparams = self.vp_ps.toDict()
+        # Newer PyTorch Lightning exposes hparams as a read-only property.
+        # The final experiment config is already persisted above.
 
     @rank_zero_only
     def prepare_data(self):
@@ -344,6 +405,8 @@ def train_vposer_once(_config):
             resume_from_checkpoint = available_ckpts[-1]
             model.text_logger('Resuming the training from {}'.format(resume_from_checkpoint))
 
+    gradient_clip_val = getattr(model.vp_ps.train_parms, 'gradient_clip_val', 0.0)
+
     trainer = pl.Trainer( # gpus=1,
                          # weights_summary='top',
                          # distributed_backend = 'ddp',
@@ -358,6 +421,7 @@ def train_vposer_once(_config):
                          # strategy=DDPStrategy(),
 
                          callbacks=[lr_monitor, early_stop_callback, checkpoint_callback],
+                         gradient_clip_val=gradient_clip_val,
 
                          max_epochs=model.vp_ps.train_parms.num_epochs,
                          logger=logger,

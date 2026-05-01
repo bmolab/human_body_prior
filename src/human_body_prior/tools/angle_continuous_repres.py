@@ -63,8 +63,9 @@ class geodesic_loss_R(nn.Module):
         m = torch.bmm(m1, m2.transpose(1, 2))  # batch*3*3
 
         cos = (m[:, 0, 0] + m[:, 1, 1] + m[:, 2, 2] - 1) / 2
-        cos = torch.min(cos, m1.new(np.ones(batch)))
-        cos = torch.max(cos, m1.new(np.ones(batch)) * -1)
+        # Avoid exactly +/-1 because acos has infinite gradient at the
+        # endpoints, which can poison the model weights with NaNs.
+        cos = torch.clamp(cos, -1.0 + self.eps, 1.0 - self.eps)
 
         return torch.acos(cos)
 

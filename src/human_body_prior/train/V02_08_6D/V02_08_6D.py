@@ -1,54 +1,82 @@
-# -*- coding: utf-8 -*-
-#
-# Copyright (C) 2019 Max-Planck-Gesellschaft zur Förderung der Wissenschaften e.V. (MPG),
-# acting on behalf of its Max Planck Institute for Intelligent Systems and the
-# Max Planck Institute for Biological Cybernetics. All rights reserved.
-#
-# Max-Planck-Gesellschaft zur Förderung der Wissenschaften e.V. (MPG) is holder of all proprietary rights
-# on this computer program. You can only use this computer program if you have closed a license agreement
-# with MPG or you get the right to use the computer program from someone who is authorized to grant you that right.
-# Any use of the computer program without a valid license is prohibited and liable to prosecution.
-# Contact: ps-license@tuebingen.mpg.de
-#
-#
-# If you use this code in a research publication please consider citing the following:
-#
-# Expressive Body Capture: 3D Hands, Face, and Body from a Single Image <https://arxiv.org/abs/1904.05866>
-#
-#
-# Code Developed by:
-# Nima Ghorbani <https://nghorbani.github.io/>
-#
-# 2020.12.12
+r"""6DOF VPoser training entry point.
 
+Example:
+    python -m human_body_prior.train.V02_08_6D.V02_08_6D \
+        --dataset-dir D:\Git\human_body_prior\AMASS\DataSet\SFU_test \
+        --expr-id V02_08_6D_50ep \
+        --num-epochs 50
+"""
+
+import argparse
 import glob
 import os.path as osp
 
 from human_body_prior.tools.configurations import load_config
 from human_body_prior.train.vposer_trainer import train_vposer_once
 
+
 def main():
-    expr_id = 'V02_08_6D'
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument(
+        "--dataset-dir",
+        required=True,
+        help="Prepared VPoser dataset root containing train/vald/test pose_body.pt files.",
+    )
+    parser.add_argument(
+        "--work-basedir",
+        default=osp.abspath(
+            osp.join(
+                osp.dirname(__file__),
+                "../../../../support_data/training/training_experiments",
+            )
+        ),
+        help="Where experiment outputs/checkpoints are written.",
+    )
+    parser.add_argument("--expr-id", default="V02_08_6D")
+    parser.add_argument("--batch-size", type=int, default=32)
+    parser.add_argument("--num-epochs", type=int, default=50)
+    parser.add_argument("--num-workers", type=int, default=0)
+    parser.add_argument("--lr", type=float, default=1e-4)
+    parser.add_argument("--gradient-clip-val", type=float, default=1.0)
+    parser.add_argument(
+        "--bm-fname",
+        default=osp.abspath(
+            osp.join(
+                osp.dirname(__file__),
+                "../../../../support_data/dowloads/models/smplx/neutral/SMPLX_NEUTRAL.npz",
+            )
+        ),
+        help="Body model .npz file used for joint/mesh losses.",
+    )
+    args = parser.parse_args()
 
-    default_ps_fname = glob.glob(osp.join(osp.dirname(__file__), '*.yaml'))[0]
-
+    default_ps_fname = glob.glob(osp.join(osp.dirname(__file__), "*.yaml"))[0]
     vp_ps = load_config(default_ps_fname)
 
-    vp_ps.train_parms.batch_size = 128
+    dataset_dir = osp.abspath(args.dataset_dir)
+    vp_ps.general.dataset_basedir = osp.dirname(dataset_dir)
+    vp_ps.general.dataset_id = osp.basename(dataset_dir)
+    vp_ps.general.work_basedir = osp.abspath(args.work_basedir)
+    vp_ps.general.expr_id = args.expr_id
+    vp_ps.body_model.bm_fname = osp.abspath(args.bm_fname)
 
-    vp_ps.general.expr_id = expr_id
+    vp_ps.train_parms.batch_size = args.batch_size
+    vp_ps.train_parms.num_epochs = args.num_epochs
+    vp_ps.train_parms.gen_optimizer.args.lr = args.lr
+    vp_ps.train_parms.gradient_clip_val = args.gradient_clip_val
+    vp_ps.data_parms.num_workers = args.num_workers
+    vp_ps.logging.render_during_training = False
 
-    total_jobs = []
-    total_jobs.append(vp_ps.toDict().copy())
+    print("Training dataset_dir:", dataset_dir)
+    print("Training work_dir:", osp.join(vp_ps.general.work_basedir, vp_ps.general.expr_id))
+    print("Training epochs:", vp_ps.train_parms.num_epochs)
+    print("Training batch_size:", vp_ps.train_parms.batch_size)
+    print("Training lr:", vp_ps.train_parms.gen_optimizer.args.lr)
+    print("Training gradient_clip_val:", vp_ps.train_parms.gradient_clip_val)
+    print("Training bm_fname:", vp_ps.body_model.bm_fname)
 
-    print('#training_jobs to be done: {}'.format(len(total_jobs)))
-    if len(total_jobs) == 0:
-        print('No jobs to be done')
-        return
-
-    for job in total_jobs:
-        train_vposer_once(job)
+    train_vposer_once(vp_ps.toDict().copy())
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     main()
