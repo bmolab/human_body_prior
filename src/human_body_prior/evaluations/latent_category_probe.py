@@ -26,11 +26,23 @@ import torch
 
 from human_body_prior.evaluations.latent_video_probe import (
     DEFAULT_VPOSER_V1_DIR,
-    encode_pose_sequence,
     load_vposer_model,
     project_latents,
     str2bool,
 )
+
+
+try:
+    from tqdm import tqdm
+except ImportError:
+    tqdm = None
+
+
+def progress_iter(iterable, desc=None, total=None, enabled=True):
+    """Use tqdm when available, otherwise return the original iterable."""
+    if enabled and tqdm is not None:
+        return tqdm(iterable, desc=desc, total=total)
+    return iterable
 
 
 def find_npz_files(data_dir, max_files=None):
@@ -113,7 +125,7 @@ def load_sampled_poses(
     source_files = []
     frame_ids = []
 
-    for npz_path in npz_files:
+    for npz_path in progress_iter(npz_files, desc="Loading .npz files"):
         data = np.load(npz_path)
         if "poses" not in data:
             print("Skipping without poses key: {}".format(npz_path))
@@ -143,6 +155,24 @@ def load_sampled_poses(
         np.asarray(source_files),
         np.asarray(frame_ids, dtype=np.int64),
     )
+
+
+def encode_pose_sequence_with_progress(vp_model, pose_body, batch_size, device):
+    """Encode frames independently and collect latent means with a progress bar."""
+    latents = []
+    batch_starts = range(0, len(pose_body), batch_size)
+    total_batches = int(np.ceil(float(len(pose_body)) / float(batch_size)))
+
+    with torch.no_grad():
+        for start in progress_iter(
+            batch_starts, desc="Encoding frames", total=total_batches
+        ):
+            batch = pose_body[start : start + batch_size].to(device)
+            encoded = vp_model.encode(batch)
+            q_z = encoded["latents"] if isinstance(encoded, dict) else encoded
+            latents.append(q_z.mean.detach().cpu())
+
+    return torch.cat(latents).numpy()
 
 
 def write_category_counts(categories, source_files, out_csv):
@@ -369,10 +399,13 @@ def main():
     )
 
     vp_model = load_vposer_model(args.expr_dir, device, args.six_dof)
-    latents = encode_pose_sequence(vp_model, pose_body, args.batch_size, device)
+    latents = encode_pose_sequence_with_progress(
+        vp_model, pose_body, args.batch_size, device
+    )
 
     projected = {}
     for method in run_projection_methods(args.method):
+        print("Projecting latents with {}...".format(method))
         points_2d = project_latents(latents, method)
         projected[method] = points_2d
         out_png = osp.join(args.out_dir, "latent_categories_{}.png".format(method))
