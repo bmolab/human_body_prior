@@ -32,7 +32,7 @@ from human_body_prior.tools.omni_tools import logger_sequencer
 from human_body_prior.tools.omni_tools import makepath, log2file
 
 
-def dataset_exists(dataset_dir, split_names=None):
+def dataset_exists(dataset_dir, split_names=None, data_fields=None):
     '''
     This function checks whether a valid SuperCap dataset directory exists at a location
     Parameters
@@ -46,20 +46,40 @@ def dataset_exists(dataset_dir, split_names=None):
     if dataset_dir is None: return False
     if split_names is None:
         split_names = ['train', 'vald', 'test']
+    if data_fields is None:
+        data_fields = ['root_orient', 'pose_body']
     import os
 
     import numpy as np
 
     done = []
     for split_name in split_names:
-        for k in ['root_orient', 'pose_body']:  # , 'betas', 'trans', 'joints']:
+        for k in data_fields:  # , 'betas', 'trans', 'joints']:
             outfname = os.path.join(dataset_dir, split_name, f'{k}.pt')
             done.append(os.path.exists(outfname))
     return np.all(done)
 
 
-def prepare_vposer_datasets(vposer_dataset_dir, amass_splits, amass_dir, logger=None):
-    if dataset_exists(vposer_dataset_dir):
+def _compute_torque_proxy(poses):
+    pose_body = poses[:, 3:66].astype(np.float32)
+    pose_flat = pose_body.reshape(pose_body.shape[0], -1)
+
+    pose_speed = np.zeros(pose_body.shape[0], dtype=np.float32)
+    pose_speed[1:] = np.linalg.norm(pose_flat[1:] - pose_flat[:-1], axis=-1)
+
+    pose_acceleration = np.zeros_like(pose_speed)
+    pose_acceleration[1:] = np.abs(pose_speed[1:] - pose_speed[:-1])
+
+    pose_magnitude = np.linalg.norm(pose_body.reshape(pose_body.shape[0], 21, 3), axis=-1).mean(axis=-1)
+    return (pose_magnitude * (pose_speed + pose_acceleration)).astype(np.float32)
+
+
+def prepare_vposer_datasets(vposer_dataset_dir, amass_splits, amass_dir, logger=None, include_torque_proxy=False):
+    data_fields = ['root_orient', 'pose_body']
+    if include_torque_proxy:
+        data_fields.append('torque_proxy')
+
+    if dataset_exists(vposer_dataset_dir, data_fields=data_fields):
         if logger is not None: logger(f'VPoser dataset already exists at {vposer_dataset_dir}')
         return
 
@@ -98,11 +118,15 @@ def prepare_vposer_datasets(vposer_dataset_dir, amass_splits, amass_dir, logger=
                 cdata_ids = np.random.choice(list(range(int(0.1 * N), int(0.9 * N), 1)), int(keep_rate * 0.8 * N),
                                              replace=False)
                 if len(cdata_ids) < 1: continue
-                fullpose = cdata['poses'][cdata_ids].astype(np.float32)
-                yield {'pose_body': fullpose[:, 3:66], 'root_orient': fullpose[:, :3]}
+                poses = cdata['poses'].astype(np.float32)
+                fullpose = poses[cdata_ids]
+                data = {'pose_body': fullpose[:, 3:66], 'root_orient': fullpose[:, :3]}
+                if include_torque_proxy:
+                    data['torque_proxy'] = _compute_torque_proxy(poses)[cdata_ids]
+                yield data
 
     for split_name, ds_names in amass_splits.items():
-        if dataset_exists(vposer_dataset_dir, split_names=[split_name]): continue
+        if dataset_exists(vposer_dataset_dir, split_names=[split_name], data_fields=data_fields): continue
         logger(f'Preparing VPoser data for split {split_name}')
 
         data_fields = {}

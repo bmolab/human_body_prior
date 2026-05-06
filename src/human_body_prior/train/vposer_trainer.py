@@ -43,6 +43,7 @@ from human_body_prior.data.dataloader import VPoserDS
 from human_body_prior.data.prepare_data import dataset_exists
 from human_body_prior.data.prepare_data import prepare_vposer_datasets
 from human_body_prior.models.vposer_model import VPoser
+from human_body_prior.models.vposer_torque_model import VPoserTorqueProxy
 from human_body_prior.tools.angle_continuous_repres import geodesic_loss_R
 from human_body_prior.tools.configurations import load_config, dump_config
 from human_body_prior.tools.omni_tools import copy2cpu as c2c
@@ -100,8 +101,14 @@ class VPoserTrainer(LightningModule):
         self.loss_history = LossHistoryRecorder(self.work_dir, logger=self.text_logger)
 
         self.seq_len = vp_ps.data_parms.num_timeseq_frames
+        self.use_torque_proxy = self._uses_torque_proxy(vp_ps)
+        self.torque_proxy_normalize = bool(vp_ps.train_parms.toDict().get('torque_proxy_normalize', True))
+        self._torque_proxy_stats_ready = False
+        self.register_buffer('torque_proxy_mean', torch.zeros(1))
+        self.register_buffer('torque_proxy_std', torch.ones(1))
 
-        self.vp_model = VPoser(vp_ps)
+        vp_model_class = VPoserTorqueProxy if self.use_torque_proxy else VPoser
+        self.vp_model = vp_model_class(vp_ps)
 
         with torch.no_grad():
             self.bm_train = BodyModel(vp_ps.body_model.bm_fname)
@@ -118,14 +125,40 @@ class VPoserTrainer(LightningModule):
 
         return self.vp_model(pose_body)
 
+    @staticmethod
+    def _uses_torque_proxy(vp_ps):
+        loss_weights = vp_ps.train_parms.loss_weights.toDict()
+        return float(loss_weights.get('loss_torque_proxy_wt', 0.0)) > 0.0
+
+    def _ensure_torque_proxy_stats(self):
+        if not self.use_torque_proxy or not self.torque_proxy_normalize or self._torque_proxy_stats_ready:
+            return
+
+        torque_fname = osp.join(self.dataset_dir, 'train', 'torque_proxy.pt')
+        torque_proxy = torch.load(torque_fname).type(torch.float32).view(-1)
+        torque_std = torque_proxy.std(unbiased=False)
+        if torque_std.item() < 1e-8:
+            torque_std = torch.ones_like(torque_std)
+
+        self.torque_proxy_mean.copy_(torque_proxy.mean().to(self.torque_proxy_mean.device).view(1))
+        self.torque_proxy_std.copy_(torque_std.to(self.torque_proxy_std.device).view(1))
+        self._torque_proxy_stats_ready = True
+
     def _get_data(self, split_name):
 
         assert split_name in ('train', 'vald', 'test')
 
         split_name = split_name.replace('vald', 'vald')
 
-        assert dataset_exists(self.dataset_dir), FileNotFoundError('Dataset does not exist dataset_dir = {}'.format(self.dataset_dir))
-        dataset = VPoserDS(osp.join(self.dataset_dir, split_name), data_fields = ['pose_body'])
+        required_fields = ['root_orient', 'pose_body']
+        data_fields = ['pose_body']
+        if self.use_torque_proxy:
+            required_fields.append('torque_proxy')
+            data_fields.append('torque_proxy')
+
+        assert dataset_exists(self.dataset_dir, data_fields=required_fields), FileNotFoundError('Dataset does not exist dataset_dir = {}'.format(self.dataset_dir))
+        dataset = VPoserDS(osp.join(self.dataset_dir, split_name), data_fields=data_fields)
+        self._ensure_torque_proxy_stats()
 
         assert len(dataset) != 0, ValueError('Dataset has nothing in it!')
 
@@ -207,6 +240,7 @@ class VPoserTrainer(LightningModule):
         loss_rec_wt = self.vp_ps.train_parms.loss_weights.loss_rec_wt
         loss_matrot_wt = self.vp_ps.train_parms.loss_weights.loss_matrot_wt
         loss_jtr_wt = self.vp_ps.train_parms.loss_weights.loss_jtr_wt
+        loss_torque_proxy_wt = self.vp_ps.train_parms.loss_weights.toDict().get('loss_torque_proxy_wt', 0.0)
 
         # q_z = torch.distributions.normal.Normal(drec['mean'], drec['std'])
         q_z = drec['q_z']
@@ -235,6 +269,15 @@ class VPoserTrainer(LightningModule):
             # breakpoint()
             weighted_loss_dict['matrot'] = loss_matrot_wt * geodesic_loss(drec['pose_body_matrot'].view(-1,3,3), aa2matrot(dorig['pose_body'].view(-1, 3)))
             weighted_loss_dict['jtr'] = loss_jtr_wt * l1_loss(bm_rec.Jtr, bm_orig.Jtr)
+
+        if self.use_torque_proxy:
+            target_torque_proxy = dorig['torque_proxy'].view(-1).to(device)
+            if self.torque_proxy_normalize:
+                target_torque_proxy = (target_torque_proxy - self.torque_proxy_mean) / (self.torque_proxy_std + 1e-8)
+            weighted_loss_dict['torque_proxy'] = loss_torque_proxy_wt * l1_loss(
+                drec['pred_torque_proxy'].view(-1),
+                target_torque_proxy,
+            )
 
         weighted_loss_dict['loss_total'] = torch.stack(list(weighted_loss_dict.values())).sum()
 
@@ -367,7 +410,13 @@ class VPoserTrainer(LightningModule):
         '''
         self.text_logger = log2file(makepath(self.work_dir, '{}.log'.format(self.expr_id), isfile=True), prefix=self._log_prefix)
 
-        prepare_vposer_datasets(self.dataset_dir, self.vp_ps.data_parms.amass_splits, self.vp_ps.data_parms.amass_dir, logger=self.text_logger)
+        prepare_vposer_datasets(
+            self.dataset_dir,
+            self.vp_ps.data_parms.amass_splits,
+            self.vp_ps.data_parms.amass_dir,
+            logger=self.text_logger,
+            include_torque_proxy=self.use_torque_proxy,
+        )
 
 
 def create_expr_message(ps):
