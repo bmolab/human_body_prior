@@ -103,6 +103,10 @@ class VPoserTrainer(LightningModule):
         self.seq_len = vp_ps.data_parms.num_timeseq_frames
         self.use_torque_proxy = self._uses_torque_proxy(vp_ps)
         self.torque_proxy_normalize = bool(vp_ps.train_parms.toDict().get('torque_proxy_normalize', True))
+        # Torque labels can be long-tailed, so these options make scaling/loss robust.
+        self.torque_proxy_normalization = vp_ps.train_parms.toDict().get('torque_proxy_normalization', 'mean_std')
+        self.torque_proxy_loss = vp_ps.train_parms.toDict().get('torque_proxy_loss', 'smooth_l1')
+        self.torque_proxy_smooth_l1_beta = float(vp_ps.train_parms.toDict().get('torque_proxy_smooth_l1_beta', 1.0))
         self._torque_proxy_stats_ready = False
         self.register_buffer('torque_proxy_mean', torch.zeros(1))
         self.register_buffer('torque_proxy_std', torch.ones(1))
@@ -136,12 +140,27 @@ class VPoserTrainer(LightningModule):
 
         torque_fname = osp.join(self.dataset_dir, 'train', 'torque_proxy.pt')
         torque_proxy = torch.load(torque_fname).type(torch.float32).view(-1)
-        torque_std = torque_proxy.std(unbiased=False)
-        if torque_std.item() < 1e-8:
-            torque_std = torch.ones_like(torque_std)
+        finite_mask = torch.isfinite(torque_proxy)
+        torque_proxy = torque_proxy[finite_mask]
+        if torque_proxy.numel() == 0:
+            raise ValueError('No finite torque_proxy values found in {}'.format(torque_fname))
 
-        self.torque_proxy_mean.copy_(torque_proxy.mean().to(self.torque_proxy_mean.device).view(1))
-        self.torque_proxy_std.copy_(torque_std.to(self.torque_proxy_std.device).view(1))
+        # Robust mode uses median/IQR so a few high-effort frames do not set the scale.
+        if self.torque_proxy_normalization in ('robust', 'median_iqr'):
+            q25 = torch.quantile(torque_proxy, 0.25)
+            q50 = torch.quantile(torque_proxy, 0.50)
+            q75 = torch.quantile(torque_proxy, 0.75)
+            torque_center = q50
+            torque_scale = q75 - q25
+        else:
+            torque_center = torque_proxy.mean()
+            torque_scale = torque_proxy.std(unbiased=False)
+
+        if torque_scale.item() < 1e-8:
+            torque_scale = torch.ones_like(torque_scale)
+
+        self.torque_proxy_mean.copy_(torque_center.to(self.torque_proxy_mean.device).view(1))
+        self.torque_proxy_std.copy_(torque_scale.to(self.torque_proxy_std.device).view(1))
         self._torque_proxy_stats_ready = True
 
     def _get_data(self, split_name):
@@ -274,10 +293,17 @@ class VPoserTrainer(LightningModule):
             target_torque_proxy = dorig['torque_proxy'].view(-1).to(device)
             if self.torque_proxy_normalize:
                 target_torque_proxy = (target_torque_proxy - self.torque_proxy_mean) / (self.torque_proxy_std + 1e-8)
-            weighted_loss_dict['torque_proxy'] = loss_torque_proxy_wt * l1_loss(
-                drec['pred_torque_proxy'].view(-1),
-                target_torque_proxy,
-            )
+            # SmoothL1 is less sensitive to noisy proxy targets than plain L1.
+            if self.torque_proxy_loss.lower() in ('smooth_l1', 'huber'):
+                torque_loss = torch.nn.functional.smooth_l1_loss(
+                    drec['pred_torque_proxy'].view(-1),
+                    target_torque_proxy,
+                    beta=self.torque_proxy_smooth_l1_beta,
+                    reduction='mean',
+                )
+            else:
+                torque_loss = l1_loss(drec['pred_torque_proxy'].view(-1), target_torque_proxy)
+            weighted_loss_dict['torque_proxy'] = loss_torque_proxy_wt * torque_loss
 
         weighted_loss_dict['loss_total'] = torch.stack(list(weighted_loss_dict.values())).sum()
 

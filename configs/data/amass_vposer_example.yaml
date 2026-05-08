@@ -7,25 +7,24 @@
 # Note: Replace the dataset names below with the AMASS subsets you have downloaded.
 
 amass_dir: AMASS
-out_dir: AMASS/DataSet/vposer_amass_example
+include_torque_proxy: true
+out_dir: AMASS/DataSet/SFU_test_torque_proxy
 log_name: prepare.log
+
+
+
+preprocessing:
+  keep_rate: 0.3
+  max_frames_per_sequence: 500
+  max_frames_per_dataset: 50000
+  torque_proxy_use_fps: true
+  torque_proxy_log1p: true
+  torque_proxy_filter_percentile: 99.5
 
 splits:
   vald:
-    - HumanEva
-    - MPI_HDM05
     - SFU
-    - MPI_mosh
   test:
-    - Transitions_mocap
-    - SSM_synced
+    - SFU
   train:
-    - CMU
-    - MPI_Limits
-    - TotalCapture
-    - Eyes_Japan_Dataset
-    - KIT
-    - BML
-    - EKUT
-    - TCD_handMocap
-    - ACCAD
+    - SFU
