@@ -98,6 +98,7 @@ class VPoserTrainer(LightningModule):
         self.work_dir = vp_ps.logging.work_dir = makepath(vp_ps.general.work_basedir, self.expr_id)
         self.dataset_dir = vp_ps.logging.dataset_dir = osp.join(vp_ps.general.dataset_basedir, vp_ps.general.dataset_id)
         self.source_dataset_names = self._load_source_dataset_names()
+        self.val_split_names = ['vald']
 
         self._log_prefix = '[{}]'.format(self.expr_id)
         self.text_logger = log2file(prefix=self._log_prefix)
@@ -175,7 +176,7 @@ class VPoserTrainer(LightningModule):
 
     def _get_data(self, split_name):
 
-        assert split_name in ('train', 'vald', 'test')
+        assert split_name in ('train', 'vald', 'test', 'vald_cross', 'test_cross')
 
         split_name = split_name.replace('vald', 'vald')
 
@@ -189,7 +190,7 @@ class VPoserTrainer(LightningModule):
             if not self.source_dataset_names:
                 self.source_dataset_names = self._load_source_dataset_names()
 
-        assert dataset_exists(self.dataset_dir, data_fields=required_fields), FileNotFoundError('Dataset does not exist dataset_dir = {}'.format(self.dataset_dir))
+        assert dataset_exists(self.dataset_dir, split_names=[split_name], data_fields=required_fields), FileNotFoundError('Dataset split does not exist dataset_dir = {}, split_name = {}'.format(self.dataset_dir, split_name))
         dataset = VPoserDS(osp.join(self.dataset_dir, split_name), data_fields=data_fields)
         self._ensure_torque_proxy_stats()
 
@@ -234,7 +235,11 @@ class VPoserTrainer(LightningModule):
         return self._get_data('train')
 
     def val_dataloader(self):
-        return self._get_data('vald')
+        self.val_split_names = ['vald']
+        if osp.isdir(osp.join(self.dataset_dir, 'vald_cross')):
+            self.val_split_names.append('vald_cross')
+        val_loaders = [self._get_data(split_name) for split_name in self.val_split_names]
+        return val_loaders[0] if len(val_loaders) == 1 else val_loaders
 
     def configure_optimizers(self):
         params_count = lambda params: sum(p.numel() for p in params if p.requires_grad)
@@ -361,18 +366,20 @@ class VPoserTrainer(LightningModule):
         progress_bar = {k: c2c(v) for k, v in loss['weighted_loss'].items()}
         return {'loss': train_loss, 'progress_bar':progress_bar,  'log': tensorboard_logs}
 
-    def validation_step(self, batch, batch_idx):
+    def validation_step(self, batch, batch_idx, dataloader_idx=0):
+        split_name = self._validation_split_name(dataloader_idx)
 
         drec = self(batch['pose_body'].view(-1, 63))
 
         loss = self._compute_loss(batch, drec, return_sample_loss='source_dataset' in batch)
-        if not self._is_sanity_checking():
+        if split_name == 'vald' and not self._is_sanity_checking():
             self.loss_history.update('vald', loss['weighted_loss'])
-        self._log_loss_components('vald', loss['weighted_loss'])
+        self._log_loss_components(split_name, loss['weighted_loss'])
         if 'source_dataset' in batch:
-            self._log_source_loss_components('vald', loss['sample_loss'], batch['source_dataset'])
+            self._log_source_loss_components(split_name, loss['sample_loss'], batch['source_dataset'])
         val_loss = loss['weighted_loss']['loss_total']
-        self.log('val_loss', val_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
+        if split_name == 'vald':
+            self.log('val_loss', val_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True, add_dataloader_idx=False)
 
         if self.renderer is not None and self.global_rank == 0 and batch_idx % 500==0 and np.random.rand()>0.5:
             out_fname = makepath(self.work_dir, 'renders/vald_rec_E{:03d}_It{:04d}_val_loss_{:.2f}.png'.format(self.current_epoch, batch_idx, val_loss.item()), isfile=True)
@@ -385,6 +392,12 @@ class VPoserTrainer(LightningModule):
         progress_bar = {'v2v': val_loss}
         return {'val_loss': c2c(val_loss), 'progress_bar': progress_bar, 'log': progress_bar}
 
+    def _validation_split_name(self, dataloader_idx):
+        val_split_names = getattr(self, 'val_split_names', ['vald'])
+        if dataloader_idx < len(val_split_names):
+            return val_split_names[dataloader_idx]
+        return 'vald'
+
     def _log_loss_components(self, split_name, weighted_loss):
         for loss_name, loss_value in weighted_loss.items():
             self.log(
@@ -394,6 +407,7 @@ class VPoserTrainer(LightningModule):
                 on_epoch=True,
                 prog_bar=False,
                 logger=True,
+                add_dataloader_idx=False,
             )
 
     def _log_source_loss_components(self, split_name, sample_loss, source_dataset):
@@ -414,6 +428,7 @@ class VPoserTrainer(LightningModule):
                     prog_bar=False,
                     logger=True,
                     batch_size=source_count,
+                    add_dataloader_idx=False,
                 )
 
     def _source_dataset_name(self, source_id):
