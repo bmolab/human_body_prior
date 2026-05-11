@@ -31,6 +31,7 @@ import subprocess
 from datetime import datetime as dt
 from typing import Any
 
+from numba.cuda import gpus
 from pytorch_lightning.strategies import DDPStrategy
 
 import numpy as np
@@ -494,7 +495,7 @@ def train_vposer_once(_config):
                          # limit_val_batches=0.02,
                          # num_sanity_val_steps=2,
                          # strategy=DDPStrategy(),
-
+                         accelerator='gpu',
                          callbacks=[lr_monitor, early_stop_callback, checkpoint_callback],
                          gradient_clip_val=gradient_clip_val,
 

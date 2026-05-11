@@ -21,7 +21,7 @@ logging:
 
 train_parms:
   batch_size: 64
-  num_epochs: 30
+  num_epochs: 80
   restore_optimizer: False
   gen_optimizer:
     type: Adam
@@ -33,10 +33,10 @@ train_parms:
     type: ReduceLROnPlateau
     args:
       verbose: true
-      patience: 3
+      patience: 5
   early_stopping:
     monitor: val_loss
-    min_delta: 0.0
+    min_delta: 0.001
     patience: 8
     verbose: True
     mode: min

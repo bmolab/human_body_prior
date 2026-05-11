@@ -1,0 +1,43 @@
+# Example config for preparing AMASS data for VPoser training.
+#
+# Run from the repository root:
+#   python amass_data_prep.py --config configs/data/amass_vposer_example.yaml
+
+
+# Note: Replace the dataset names below with the AMASS subsets you have downloaded.
+
+amass_dir: AMASS
+include_torque_proxy: true
+out_dir: AMASS_Processed/DataSet/amass_with_torque_full
+
+log_name: large_prepare.log
+
+preprocessing:
+  keep_rate: 0.3
+  max_frames_per_sequence: 500
+  max_frames_per_dataset: 50000
+  torque_proxy_use_fps: true
+  torque_proxy_log1p: true
+  torque_proxy_filter_percentile: 99.5
+
+splits:
+  train:
+    - TotalCapture
+    - MPILimits
+    - SFU
+    - ACCAD
+    - KIT
+    - Eyes_Japan_Dataset
+    - CMU
+    - BMLmovi
+    - BioMotionLab_NTroje
+    - EKUT
+
+  vald:
+    - HumanEva
+    - MPImosh
+    - MPI_HDM05
+
+  test:
+    - Transitions
+    - DFAUST
