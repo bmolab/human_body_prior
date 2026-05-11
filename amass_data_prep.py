@@ -59,14 +59,26 @@ def load_prep_config(config_path):
     return config
 
 
-# For validation 
+def split_names_from_config(splits):
+    """Keep the standard training splits first, then include extra eval splits."""
+    ordered_split_names = [
+        split_name for split_name in ["train", "vald", "test"] if split_name in splits
+    ]
+    ordered_split_names.extend(
+        split_name for split_name in splits.keys() if split_name not in ordered_split_names
+    )
+    return ordered_split_names
+
+
+# For validation
 def print_dataset_summary(out_dir, splits):
     """Print final prepared .pt tensor counts and shapes."""
     import torch
 
     split_counts = {}
     split_shapes = {}
-    for split_name in ["train", "vald", "test"]:
+    split_names = split_names_from_config(splits)
+    for split_name in split_names:
         pose_body_fname = osp.join(out_dir, split_name, "pose_body.pt")
         if not osp.exists(pose_body_fname):
             continue
@@ -75,7 +87,7 @@ def print_dataset_summary(out_dir, splits):
         split_counts[split_name] = int(pose_body.shape[0])
         split_shapes[split_name] = {"pose_body": tuple(pose_body.shape)}
 
-        for field_name in ["root_orient", "torque_proxy"]:
+        for field_name in ["root_orient", "torque_proxy", "source_dataset", "source_sequence"]:
             field_fname = osp.join(out_dir, split_name, "{}.pt".format(field_name))
             if osp.exists(field_fname):
                 split_shapes[split_name][field_name] = tuple(
@@ -84,7 +96,7 @@ def print_dataset_summary(out_dir, splits):
 
     total_count = sum(split_counts.values())
     print("\nPrepared dataset summary:", out_dir)
-    for split_name in ["train", "vald", "test"]:
+    for split_name in split_names:
         ds_names = splits.get(split_name, [])
         count = split_counts.get(split_name, 0)
         pct = (100.0 * count / total_count) if total_count else 0.0
@@ -105,6 +117,7 @@ def summarize_balanced_sampling(amass_dir, splits, preprocessing, include_torque
     import numpy as np
 
     from human_body_prior.data.prepare_data import _compute_torque_proxy
+    from human_body_prior.data.prepare_data import find_amass_motion_files
 
     keep_rate = preprocessing.get("keep_rate", 0.3)
     max_frames_per_sequence = preprocessing.get("max_frames_per_sequence")
@@ -113,6 +126,11 @@ def summarize_balanced_sampling(amass_dir, splits, preprocessing, include_torque
     torque_proxy_filter_percentile = preprocessing.get(
         "torque_proxy_filter_percentile", 99.5
     )
+    split_sequences_by_source = preprocessing.get("split_sequences_by_source", False)
+    sequence_split_ratios = preprocessing.get(
+        "sequence_split_ratios", {"train": 0.8, "vald": 0.1, "test": 0.1}
+    )
+    sequence_split_seed = preprocessing.get("sequence_split_seed", 100)
 
     def finite_pose_mask(poses):
         """Keep frames whose body-pose values are finite."""
@@ -129,11 +147,58 @@ def summarize_balanced_sampling(amass_dir, splits, preprocessing, include_torque
             count = min(count, int(remaining_dataset_budget))
         return max(0, min(count, candidate_count))
 
+    def build_sequence_assignments():
+        source_dataset_names = []
+        for split_ds_names in splits.values():
+            for ds_name in split_ds_names:
+                if ds_name not in source_dataset_names:
+                    source_dataset_names.append(ds_name)
+
+        rng = np.random.RandomState(int(sequence_split_seed))
+        assignments = {}
+        for ds_name in source_dataset_names:
+            requested_splits = [
+                split_name for split_name, ds_names in splits.items()
+                if ds_name in ds_names
+            ]
+            npz_fnames = find_amass_motion_files(amass_dir, ds_name)
+            if split_sequences_by_source and len(requested_splits) > 1:
+                shuffled = np.asarray(npz_fnames, dtype=object)
+                rng.shuffle(shuffled)
+                split_weights = np.asarray(
+                    [
+                        float(sequence_split_ratios.get(split_name, 1.0))
+                        for split_name in requested_splits
+                    ],
+                    dtype=np.float64,
+                )
+                if split_weights.sum() <= 0:
+                    split_weights = np.ones(len(requested_splits), dtype=np.float64)
+                split_weights = split_weights / split_weights.sum()
+                split_counts = np.floor(split_weights * len(shuffled)).astype(np.int64)
+                for split_idx in np.argsort(-split_weights):
+                    if split_counts.sum() >= len(shuffled):
+                        break
+                    split_counts[split_idx] += 1
+
+                cursor = 0
+                for split_name, split_count in zip(requested_splits, split_counts):
+                    assignments[(split_name, ds_name)] = list(
+                        shuffled[cursor:cursor + split_count]
+                    )
+                    cursor += split_count
+            else:
+                for split_name in requested_splits:
+                    assignments[(split_name, ds_name)] = npz_fnames
+        return assignments
+
+    sequence_assignments = build_sequence_assignments()
+
     summary = {}
-    for split_name in ["train", "vald", "test"]:
+    for split_name in split_names_from_config(splits):
         split_summary = {"frames_selected": 0, "datasets": {}}
         for ds_name in splits.get(split_name, []):
-            npz_fnames = glob.glob(osp.join(amass_dir, ds_name, "*", "*_poses.npz"))
+            npz_fnames = sequence_assignments.get((split_name, ds_name), [])
             ds_summary = {
                 "sequences_found": len(npz_fnames),
                 "sequences_used": 0,
@@ -224,7 +289,7 @@ def print_balanced_sampling_summary(summary):
     
     total_frames = sum(split["frames_selected"] for split in summary.values())
     print("\nBalanced sampling summary from AMASS source files:")
-    for split_name in ["train", "vald", "test"]:
+    for split_name in split_names_from_config(summary):
         split_summary = summary.get(split_name, {"frames_selected": 0, "datasets": {}})
         split_frames = split_summary["frames_selected"]
         split_pct = (100.0 * split_frames / total_frames) if total_frames else 0.0
@@ -251,10 +316,11 @@ def print_balanced_sampling_summary(summary):
             )
 
 
-def clean_existing_splits(out_dir):
+def clean_existing_splits(out_dir, splits):
     # Ask before deleting existing prepared split folders.
     split_dirs = [
-        osp.join(out_dir, split_name) for split_name in ["train", "vald", "test"]
+        osp.join(out_dir, split_name)
+        for split_name in split_names_from_config(splits)
     ]
     existing_split_dirs = [
         split_dir for split_dir in split_dirs if osp.exists(split_dir)
@@ -308,7 +374,7 @@ def main():
     logger("Prepared dataset output directory: {}".format(out_dir))
     logger("AMASS splits: {}".format(config["splits"]))
 
-    clean_existing_splits(out_dir)
+    clean_existing_splits(out_dir, config["splits"])
 
     include_torque_proxy = bool(config.get("include_torque_proxy", False))
     preprocessing = config.get("preprocessing", {})
@@ -326,6 +392,12 @@ def main():
         torque_proxy_filter_percentile=preprocessing.get(
             "torque_proxy_filter_percentile", 99.5
         ),
+        save_source_metadata=preprocessing.get("save_source_metadata", True),
+        split_sequences_by_source=preprocessing.get(
+            "split_sequences_by_source", False
+        ),
+        sequence_split_ratios=preprocessing.get("sequence_split_ratios"),
+        sequence_split_seed=preprocessing.get("sequence_split_seed", 100),
     )
     print("Prepared dataset at:", out_dir)
     print_balanced_sampling_summary(

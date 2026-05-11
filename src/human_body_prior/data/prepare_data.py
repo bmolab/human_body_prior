@@ -22,6 +22,7 @@
 # 2018.01.02
 
 import glob
+import json
 import os.path as osp
 import shutil
 
@@ -82,6 +83,16 @@ def _compute_torque_proxy(poses, mocap_framerate=None, return_components=False):
     return torque_proxy
 
 
+def find_amass_motion_files(amass_dir, ds_name):
+    """Find AMASS motion npz files across common release naming schemes."""
+
+    patterns = ['*/*_poses.npz', '*/*_stageii.npz']
+    motion_files = []
+    for pattern in patterns:
+        motion_files.extend(glob.glob(osp.join(amass_dir, ds_name, pattern)))
+    return sorted(set(motion_files))
+
+
 def prepare_vposer_datasets(
     vposer_dataset_dir,
     amass_splits,
@@ -94,12 +105,18 @@ def prepare_vposer_datasets(
     torque_proxy_use_fps=True,
     torque_proxy_log1p=True,
     torque_proxy_filter_percentile=99.5,
+    save_source_metadata=False,
+    split_sequences_by_source=False,
+    sequence_split_ratios=None,
+    sequence_split_seed=100,
 ):
-    data_fields = ['root_orient', 'pose_body']
+    required_data_fields = ['root_orient', 'pose_body']
     if include_torque_proxy:
-        data_fields.append('torque_proxy')
+        required_data_fields.append('torque_proxy')
+    if save_source_metadata:
+        required_data_fields.extend(['source_dataset', 'source_sequence'])
 
-    if dataset_exists(vposer_dataset_dir, data_fields=data_fields):
+    if dataset_exists(vposer_dataset_dir, split_names=list(amass_splits.keys()), data_fields=required_data_fields):
         if logger is not None: logger(f'VPoser dataset already exists at {vposer_dataset_dir}')
         return
 
@@ -141,9 +158,68 @@ def prepare_vposer_datasets(
             return np.asarray([], dtype=np.int64)
         return np.random.choice(candidate_ids, sample_count, replace=False)
 
-    def fetch_from_amass(ds_names):
+    def _source_dataset_names():
+        ds_names = []
+        for split_ds_names in amass_splits.values():
+            for ds_name in split_ds_names:
+                if ds_name not in ds_names:
+                    ds_names.append(ds_name)
+        return ds_names
+
+    source_dataset_names = _source_dataset_names()
+    source_dataset_to_id = {ds_name: ds_id for ds_id, ds_name in enumerate(source_dataset_names)}
+
+    def _build_sequence_assignments():
+        assignments = {}
+        split_ratios = sequence_split_ratios or {'train': 0.8, 'vald': 0.1, 'test': 0.1}
+        rng = np.random.RandomState(int(sequence_split_seed))
+        for ds_name in source_dataset_names:
+            requested_splits = [
+                split_name for split_name, ds_names in amass_splits.items()
+                if ds_name in ds_names
+            ]
+            npz_fnames = find_amass_motion_files(amass_dir, ds_name)
+            if split_sequences_by_source and len(requested_splits) > 1:
+                shuffled = np.asarray(npz_fnames, dtype=object)
+                rng.shuffle(shuffled)
+                split_weights = np.asarray(
+                    [float(split_ratios.get(split_name, 1.0)) for split_name in requested_splits],
+                    dtype=np.float64,
+                )
+                if split_weights.sum() <= 0:
+                    split_weights = np.ones(len(requested_splits), dtype=np.float64)
+                split_weights = split_weights / split_weights.sum()
+                split_counts = np.floor(split_weights * len(shuffled)).astype(np.int64)
+                for split_idx in np.argsort(-split_weights):
+                    if split_counts.sum() >= len(shuffled):
+                        break
+                    split_counts[split_idx] += 1
+
+                cursor = 0
+                for split_name, split_count in zip(requested_splits, split_counts):
+                    assignments[(split_name, ds_name)] = list(shuffled[cursor:cursor + split_count])
+                    cursor += split_count
+            else:
+                for split_name in requested_splits:
+                    assignments[(split_name, ds_name)] = npz_fnames
+        return assignments
+
+    sequence_assignments = _build_sequence_assignments()
+    source_sequence_to_id = {}
+    source_sequence_names = {}
+    for ds_name in source_dataset_names:
+        npz_fnames = find_amass_motion_files(amass_dir, ds_name)
+        source_sequence_names[ds_name] = [
+            osp.relpath(npz_fname, amass_dir).replace('\\', '/')
+            for npz_fname in npz_fnames
+        ]
+        source_sequence_to_id[ds_name] = {
+            npz_fname: sequence_id for sequence_id, npz_fname in enumerate(npz_fnames)
+        }
+
+    def fetch_from_amass(split_name, ds_names):
         for ds_name in ds_names:
-            mosh_stageII_fnames = glob.glob(osp.join(amass_dir, ds_name, '*/*_poses.npz'))
+            mosh_stageII_fnames = sequence_assignments.get((split_name, ds_name), [])
             logger('Found {} sequences from {}.'.format(len(mosh_stageII_fnames), ds_name))
 
             ds_frame_count = 0
@@ -190,6 +266,17 @@ def prepare_vposer_datasets(
                 if len(cdata_ids) < 1: continue
                 fullpose = poses[cdata_ids]
                 data = {'pose_body': fullpose[:, 3:66], 'root_orient': fullpose[:, :3]}
+                if save_source_metadata:
+                    data['source_dataset'] = np.full(
+                        len(cdata_ids),
+                        source_dataset_to_id[ds_name],
+                        dtype=np.int64,
+                    )
+                    data['source_sequence'] = np.full(
+                        len(cdata_ids),
+                        source_sequence_to_id[ds_name].get(npz_fname, -1),
+                        dtype=np.int64,
+                    )
                 if include_torque_proxy:
                     selected_torque_proxy = torque_proxy[cdata_ids]
                     if torque_proxy_log1p:
@@ -200,22 +287,34 @@ def prepare_vposer_datasets(
                 yield data
 
     for split_name, ds_names in amass_splits.items():
-        if dataset_exists(vposer_dataset_dir, split_names=[split_name], data_fields=data_fields): continue
+        if dataset_exists(vposer_dataset_dir, split_names=[split_name], data_fields=required_data_fields): continue
         logger(f'Preparing VPoser data for split {split_name}')
 
-        data_fields = {}
-        for data in fetch_from_amass(ds_names):
+        split_data_fields = {}
+        for data in fetch_from_amass(split_name, ds_names):
             for k in data.keys():
-                if k not in data_fields: data_fields[k] = []
-                data_fields[k].append(data[k])
+                if k not in split_data_fields: split_data_fields[k] = []
+                split_data_fields[k].append(data[k])
 
-        for k, v in data_fields.items():
+        split_count = 0
+        for k, v in split_data_fields.items():
             outpath = makepath(vposer_dataset_dir, split_name, '{}.pt'.format(k), isfile=True)
             v = np.concatenate(v)
+            split_count = len(v)
             torch.save(torch.tensor(v), outpath)
 
         logger(
-            f'{len(v)} datapoints dumped for split {split_name}. ds_meta_pklpath: {osp.join(vposer_dataset_dir, split_name)}')
+            f'{split_count} datapoints dumped for split {split_name}. ds_meta_pklpath: {osp.join(vposer_dataset_dir, split_name)}')
+
+    if save_source_metadata:
+        source_names_path = makepath(vposer_dataset_dir, 'source_dataset_names.json', isfile=True)
+        with open(source_names_path, 'w') as source_names_file:
+            json.dump(source_dataset_names, source_names_file, indent=2)
+        logger(f'Dumped source dataset name map at {source_names_path}')
+        sequence_names_path = makepath(vposer_dataset_dir, 'source_sequence_names.json', isfile=True)
+        with open(sequence_names_path, 'w') as sequence_names_file:
+            json.dump(source_sequence_names, sequence_names_file, indent=2)
+        logger(f'Dumped source sequence name map at {sequence_names_path}')
 
     Configer(**{
         'amass_splits': amass_splits.toDict(),

@@ -25,6 +25,7 @@
 
 import glob
 import inspect
+import json
 import os
 import os.path as osp
 import subprocess
@@ -96,6 +97,7 @@ class VPoserTrainer(LightningModule):
 
         self.work_dir = vp_ps.logging.work_dir = makepath(vp_ps.general.work_basedir, self.expr_id)
         self.dataset_dir = vp_ps.logging.dataset_dir = osp.join(vp_ps.general.dataset_basedir, vp_ps.general.dataset_id)
+        self.source_dataset_names = self._load_source_dataset_names()
 
         self._log_prefix = '[{}]'.format(self.expr_id)
         self.text_logger = log2file(prefix=self._log_prefix)
@@ -134,6 +136,13 @@ class VPoserTrainer(LightningModule):
     def _uses_torque_proxy(vp_ps):
         loss_weights = vp_ps.train_parms.loss_weights.toDict()
         return float(loss_weights.get('loss_torque_proxy_wt', 0.0)) > 0.0
+
+    def _load_source_dataset_names(self):
+        source_names_fname = osp.join(self.dataset_dir, 'source_dataset_names.json')
+        if not osp.exists(source_names_fname):
+            return []
+        with open(source_names_fname, 'r') as source_names_file:
+            return json.load(source_names_file)
 
     def _ensure_torque_proxy_stats(self):
         if not self.use_torque_proxy or not self.torque_proxy_normalize or self._torque_proxy_stats_ready:
@@ -175,6 +184,10 @@ class VPoserTrainer(LightningModule):
         if self.use_torque_proxy:
             required_fields.append('torque_proxy')
             data_fields.append('torque_proxy')
+        if osp.exists(osp.join(self.dataset_dir, split_name, 'source_dataset.pt')):
+            data_fields.append('source_dataset')
+            if not self.source_dataset_names:
+                self.source_dataset_names = self._load_source_dataset_names()
 
         assert dataset_exists(self.dataset_dir, data_fields=required_fields), FileNotFoundError('Dataset does not exist dataset_dir = {}'.format(self.dataset_dir))
         dataset = VPoserDS(osp.join(self.dataset_dir, split_name), data_fields=data_fields)
@@ -249,9 +262,8 @@ class VPoserTrainer(LightningModule):
         ]
         return [gen_optimizer], schedulers
 
-    def _compute_loss(self, dorig, drec):
-        l1_loss = torch.nn.L1Loss(reduction='mean')
-        geodesic_loss = geodesic_loss_R(reduction='mean')
+    def _compute_loss(self, dorig, drec, return_sample_loss=False):
+        geodesic_loss_per_joint = geodesic_loss_R(reduction='none')
 
         bs, latentD = drec['poZ_body_mean'].shape
         device = drec['poZ_body_mean'].device
@@ -280,15 +292,28 @@ class VPoserTrainer(LightningModule):
         p_z = torch.distributions.normal.Normal(
             loc=torch.zeros((bs, latentD), device=device, requires_grad=False),
             scale=torch.ones((bs, latentD), device=device, requires_grad=False))
+        sample_loss_dict = {
+            'loss_kl': loss_kl_wt * torch.sum(torch.distributions.kl.kl_divergence(q_z, p_z), dim=[1])
+        }
+
         weighted_loss_dict = {
-            'loss_kl':loss_kl_wt * torch.mean(torch.sum(torch.distributions.kl.kl_divergence(q_z, p_z), dim=[1])) #,
+            'loss_kl': torch.mean(sample_loss_dict['loss_kl']) #,
             # 'loss_mesh_rec': loss_rec_wt * v2v
         }
 
         if (self.current_epoch < self.vp_ps.train_parms.keep_extra_loss_terms_until_epoch):
             # breakpoint()
-            weighted_loss_dict['matrot'] = loss_matrot_wt * geodesic_loss(drec['pose_body_matrot'].view(-1,3,3), aa2matrot(dorig['pose_body'].view(-1, 3)))
-            weighted_loss_dict['jtr'] = loss_jtr_wt * l1_loss(bm_rec.Jtr, bm_orig.Jtr)
+            matrot_per_joint = geodesic_loss_per_joint(
+                drec['pose_body_matrot'].view(-1, 3, 3),
+                aa2matrot(dorig['pose_body'].view(-1, 3)),
+            ).view(bs, -1)
+            sample_loss_dict['matrot'] = loss_matrot_wt * matrot_per_joint.mean(dim=1)
+            sample_loss_dict['jtr'] = loss_jtr_wt * torch.mean(
+                torch.abs(bm_rec.Jtr - bm_orig.Jtr).view(bs, -1),
+                dim=1,
+            )
+            weighted_loss_dict['matrot'] = sample_loss_dict['matrot'].mean()
+            weighted_loss_dict['jtr'] = sample_loss_dict['jtr'].mean()
 
         if self.use_torque_proxy:
             target_torque_proxy = dorig['torque_proxy'].view(-1).to(device)
@@ -300,13 +325,15 @@ class VPoserTrainer(LightningModule):
                     drec['pred_torque_proxy'].view(-1),
                     target_torque_proxy,
                     beta=self.torque_proxy_smooth_l1_beta,
-                    reduction='mean',
+                    reduction='none',
                 )
             else:
-                torque_loss = l1_loss(drec['pred_torque_proxy'].view(-1), target_torque_proxy)
-            weighted_loss_dict['torque_proxy'] = loss_torque_proxy_wt * torque_loss
+                torque_loss = torch.abs(drec['pred_torque_proxy'].view(-1) - target_torque_proxy)
+            sample_loss_dict['torque_proxy'] = loss_torque_proxy_wt * torque_loss
+            weighted_loss_dict['torque_proxy'] = sample_loss_dict['torque_proxy'].mean()
 
         weighted_loss_dict['loss_total'] = torch.stack(list(weighted_loss_dict.values())).sum()
+        sample_loss_dict['loss_total'] = torch.stack(list(sample_loss_dict.values())).sum(dim=0)
 
         # with torch.no_grad():
         #     # unweighted_loss_dict = {'v2v': torch.sqrt(torch.pow(bm_rec.v-bm_orig.v, 2).sum(-1)).mean()}
@@ -314,6 +341,8 @@ class VPoserTrainer(LightningModule):
         #     unweighted_loss_dict['loss_total'] = torch.cat(
         #         list({k: v.view(-1) for k, v in unweighted_loss_dict.items()}.values()), dim=-1).sum().view(1)
 
+        if return_sample_loss:
+            return {'weighted_loss': weighted_loss_dict, 'sample_loss': sample_loss_dict}
         return {'weighted_loss': weighted_loss_dict}
         # return {'weighted_loss': weighted_loss_dict, 'unweighted_loss': unweighted_loss_dict}
 
@@ -336,10 +365,12 @@ class VPoserTrainer(LightningModule):
 
         drec = self(batch['pose_body'].view(-1, 63))
 
-        loss = self._compute_loss(batch, drec)
+        loss = self._compute_loss(batch, drec, return_sample_loss='source_dataset' in batch)
         if not self._is_sanity_checking():
             self.loss_history.update('vald', loss['weighted_loss'])
         self._log_loss_components('vald', loss['weighted_loss'])
+        if 'source_dataset' in batch:
+            self._log_source_loss_components('vald', loss['sample_loss'], batch['source_dataset'])
         val_loss = loss['weighted_loss']['loss_total']
         self.log('val_loss', val_loss, on_step=False, on_epoch=True, prog_bar=True, logger=True)
 
@@ -364,6 +395,31 @@ class VPoserTrainer(LightningModule):
                 prog_bar=False,
                 logger=True,
             )
+
+    def _log_source_loss_components(self, split_name, sample_loss, source_dataset):
+        source_dataset = source_dataset.view(-1).to(sample_loss['loss_total'].device).long()
+        for source_id in torch.unique(source_dataset):
+            source_id_int = int(source_id.item())
+            source_name = self._source_dataset_name(source_id_int)
+            source_mask = source_dataset == source_id
+            source_count = int(source_mask.sum().item())
+            if source_count < 1:
+                continue
+            for loss_name, loss_value in sample_loss.items():
+                self.log(
+                    '{}/{}/{}'.format(split_name, source_name, loss_name),
+                    loss_value[source_mask].mean().detach(),
+                    on_step=False,
+                    on_epoch=True,
+                    prog_bar=False,
+                    logger=True,
+                    batch_size=source_count,
+                )
+
+    def _source_dataset_name(self, source_id):
+        if 0 <= source_id < len(self.source_dataset_names):
+            return self.source_dataset_names[source_id]
+        return 'source_{}'.format(source_id)
 
     def on_train_epoch_start(self):
         self.loss_history.reset('train')
