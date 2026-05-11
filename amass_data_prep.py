@@ -117,7 +117,7 @@ def summarize_balanced_sampling(amass_dir, splits, preprocessing, include_torque
     import numpy as np
 
     from human_body_prior.data.prepare_data import _compute_torque_proxy
-    from human_body_prior.data.prepare_data import find_amass_motion_files
+    from human_body_prior.data.prepare_data import build_frame_balanced_sequence_assignments
 
     keep_rate = preprocessing.get("keep_rate", 0.3)
     max_frames_per_sequence = preprocessing.get("max_frames_per_sequence")
@@ -147,52 +147,18 @@ def summarize_balanced_sampling(amass_dir, splits, preprocessing, include_torque
             count = min(count, int(remaining_dataset_budget))
         return max(0, min(count, candidate_count))
 
-    def build_sequence_assignments():
-        source_dataset_names = []
-        for split_ds_names in splits.values():
-            for ds_name in split_ds_names:
-                if ds_name not in source_dataset_names:
-                    source_dataset_names.append(ds_name)
-
-        rng = np.random.RandomState(int(sequence_split_seed))
-        assignments = {}
-        for ds_name in source_dataset_names:
-            requested_splits = [
-                split_name for split_name, ds_names in splits.items()
-                if ds_name in ds_names
-            ]
-            npz_fnames = find_amass_motion_files(amass_dir, ds_name)
-            if split_sequences_by_source and len(requested_splits) > 1:
-                shuffled = np.asarray(npz_fnames, dtype=object)
-                rng.shuffle(shuffled)
-                split_weights = np.asarray(
-                    [
-                        float(sequence_split_ratios.get(split_name, 1.0))
-                        for split_name in requested_splits
-                    ],
-                    dtype=np.float64,
-                )
-                if split_weights.sum() <= 0:
-                    split_weights = np.ones(len(requested_splits), dtype=np.float64)
-                split_weights = split_weights / split_weights.sum()
-                split_counts = np.floor(split_weights * len(shuffled)).astype(np.int64)
-                for split_idx in np.argsort(-split_weights):
-                    if split_counts.sum() >= len(shuffled):
-                        break
-                    split_counts[split_idx] += 1
-
-                cursor = 0
-                for split_name, split_count in zip(requested_splits, split_counts):
-                    assignments[(split_name, ds_name)] = list(
-                        shuffled[cursor:cursor + split_count]
-                    )
-                    cursor += split_count
-            else:
-                for split_name in requested_splits:
-                    assignments[(split_name, ds_name)] = npz_fnames
-        return assignments
-
-    sequence_assignments = build_sequence_assignments()
+    sequence_assignments = build_frame_balanced_sequence_assignments(
+        amass_dir,
+        splits,
+        split_sequences_by_source=split_sequences_by_source,
+        sequence_split_ratios=sequence_split_ratios,
+        sequence_split_seed=sequence_split_seed,
+        keep_rate=keep_rate,
+        max_frames_per_sequence=max_frames_per_sequence,
+        include_torque_proxy=include_torque_proxy,
+        torque_proxy_use_fps=torque_proxy_use_fps,
+        torque_proxy_filter_percentile=torque_proxy_filter_percentile,
+    )
 
     summary = {}
     for split_name in split_names_from_config(splits):
