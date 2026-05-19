@@ -1,0 +1,79 @@
+# Config for data preprocessing.
+
+
+
+# Root folder that contains the raw AMASS dataset folders.
+amass_dir: AMASS
+
+
+# Required for the torque-proxy training entry point.
+# When true, preprocessing writes `torque_proxy.pt` for each prepared split.
+include_torque_proxy: true
+
+# Output folder for the prepared `.pt` tensors. Training should point `--dataset-dir` to this path.
+out_dir: AMASS_Processed/DataSet/test_amass_inDomain_cross_torque
+
+# Log file name written inside `out_dir`.
+log_name: prepare.log
+
+
+
+preprocessing:
+  # Fraction of valid frames sampled from each source sequence before caps are applied. Lower values make smaller prepared datasets.
+  keep_rate: 0.3
+
+  # Maximum sampled frames kept from one motion sequence. This prevents long sequence from dominating a split.
+  max_frames_per_sequence: 500
+
+  # Maximum sampled frames kept from one AMASS source dataset per split. 
+  # This is the balancing control when combining small and large AMASS datasets.
+  max_frames_per_dataset: 50000
+
+  # Scale pose speed/acceleration by each sequence's `mocap_framerate`
+  torque_proxy_use_fps: true
+
+  # Apply log1p compression to torque-proxy values before saving. 
+  # This reduces the effect of the long tail from high-motion frames.
+  torque_proxy_log1p: true
+
+  # To handle outlier: Drop frames above this torque-proxy percentile within each sequence. 
+  # Use null to disable this extreme-value filter.
+  torque_proxy_filter_percentile: 99.5
+
+  # Save source ids and name maps. Training use this to report per-source validation losses.
+  save_source_metadata: true
+
+  # If a source dataset appears in multiple in-domain splits, split whole source sequences across train/vald/test instead of sampling frames independently in each split.
+  split_sequences_by_source: true
+  # When `split_sequences_by_source` is enabled, the random seed for assigning source sequences to train/vald/test 
+  sequence_split_seed: 100
+  # Split ratios. These should usually sum to 1.0.
+  sequence_split_ratios:
+    train: 0.8
+    vald: 0.1
+    test: 0.1
+
+# AMASS datasets
+splits:
+  train:
+    - TotalCapture
+    - SFU
+
+  # In-domain validation datasets. These can be different from `train`.
+  # The trainer uses `vald` for early stopping and checkpoint selection
+  vald:
+    - TotalCapture
+    - SFU
+
+  # In-domain test datasets. These can be different from `train`/`vald`.
+  test:
+    - TotalCapture
+    - SFU
+
+  # Held-out validation datasets for cross-dataset evaluation. These are not used for early stopping.
+  vald_cross:
+    - PosePrior
+
+  # Held-out test datasets for final cross-dataset checks.
+  test_cross:
+    - Transitions

@@ -1,27 +1,28 @@
 # Latent Space Evaluation Helpers
 
-For exploring how VPoser latent codes relate to hand-built or
-future physics features. They are meant for small experiments on one dataset
-split or one ordered motion sequence, not for full AMASS benchmarking.
+The scripts below are our newly added helpers that check the learned latent representation.
 
-## Scripts
+Run commands from the repository root.
 
-### `latent_space_probe.py`
 
-**Dataset-level** scatter plot. It reads a prepared VPoser dataset folder containing
-`train/`, `vald/`, or `test/` `.pt` files, encodes each frame, projects latent
-codes to 2D, and colors points by a feature.
+## `latent_space_probe.py`
 
-Use this when you want a broad view of many independent frames.
+Dataset-level scatter plot for prepared VPoser datasets. It reads **one prepared
+split**, encodes sampled pose frames, projects latent codes to 2D, and colors each
+point by a selected **feature**.
+
+Use this for a broad view of many independent frames from `train`, `vald`, or
+`test`.
 
 ```powershell
 python -m human_body_prior.evaluations.latent_space_probe `
-  --dataset-dir D:\Git\human_body_prior\AMASS\DataSet\SFU_test `
+  --expr-dir <EXPR_DIR> ` #VPoser directory 
+  --dataset-dir AMASS\DataSet\<PREPARED_DATASET_ID> `
   --split vald `
-  --6DOF False `
-  --method pca `
-  --feature pose_magnitude `
-  --out-dir latent_probe_v1
+  --6DOF True `
+  --method pca ` # pca or umap
+  --feature <Feature_Name> `
+  --out-dir <DIR_NAME>
 ```
 
 Outputs:
@@ -34,64 +35,56 @@ latent_probe_<split>_<method>.png
 Notes:
 
 - `--6DOF False` uses the original/pretrained VPoser by default.
-- `--6DOF True` requires `--expr-dir` to point to a trained 6DOF experiment
+- `--6DOF True` requires `--expr-dir` to point to a trained VPoser
   directory with `snapshots/*.ckpt`.
-- `pose_delta` is only a rough smoke-test feature for prepared datasets because
+- `--model-variant` can be used to choose between supported model-loading paths.
+- `pose_delta` is only a rough diagnostic feature for prepared datasets because
   the default AMASS preparation samples frames randomly.
 
-### `latent_video_probe.py`
+## `latent_video_probe.py`
 
-**Sequence-level** latent trajectory plot. It reads **one** ordered AMASS `.npz`,
-extracts `poses[:, 3:66]`, encodes every frame, computes a per-frame feature,
-and writes three plots:
+**Sequence-level** latent trajectory plot. It reads **one ordered AMASS `.npz` file**,
+extracts `poses[:, 3:66]`, encodes the selected frames, computes a per-frame
+feature, and writes trajectory plots.
+
+Use this when you want to check things like how a feature changes through one 
+sequence, and how that sequence moves through VPoser latent space.
+
+```powershell
+python -m human_body_prior.evaluations.latent_video_probe `
+  --npz <File_Path> `
+  --6DOF False ` #True or False
+  --method pca ` # pca or umap
+  --feature <Feature_name> `
+  --out-dir <DIR_NAME>
+```
+
+Useful frame-selection options:
+
+```powershell
+--start-frame <START> --end-frame <END> --stride <STRIDE>
+```
+
+Outputs:
 
 ```text
+latent_video_probe.npz
 feature_over_time.png
 latent_trajectory_time.png
 latent_trajectory_feature.png
 ```
 
-Use this for the current video-style goal: see how a feature changes through one
-motion and how those changes appear in VPoser latent space.
-
-```powershell
-python -m human_body_prior.evaluations.latent_video_probe `
-  --npz D:\Git\human_body_prior\AMASS\SFU\0005\0005_Walking001_poses.npz `
-  --6DOF False `
-  --method pca `
-  --feature torque_proxy `
-  --out-dir latent_probe\video_probe_walking_torque_proxy
-```
-
-Current features live in `pose_sequence_features.py`:
-
-```text
-pose_speed
-pose_acceleration
-pose_magnitude
-torque_proxy
-```
-
-**Note**: `torque_proxy` is not physical torque. It is an exploratory effort-like feature:
-
-```text
-pose_magnitude * (pose_speed + pose_acceleration)
-```
-
-**When real torque is available, add a new feature function in
-`pose_sequence_features.py` and register it in `FEATURES`.**
-
-You can also provide a real per-frame torque or effort signal directly without
+Note: This can use a real per-frame torque or effort signal without
 editing code:
 
 ```powershell
 python -m human_body_prior.evaluations.latent_video_probe `
-  --npz D:\Git\human_body_prior\AMASS\SFU\0005\0005_Walking001_poses.npz `
+  --npz <File_Path>
   --6DOF False `
   --method pca `
   --feature external `
-  --feature-file D:\path\to\torque.npy `
-  --out-dir latent_probe\video_probe_real_torque
+  --feature-file <File_Path> `
+  --out-dir <DIR_NAME>
 ```
 
 For `.npz` feature files with multiple arrays, choose the array:
@@ -100,37 +93,30 @@ For `.npz` feature files with multiple arrays, choose the array:
 --feature-file D:\path\to\torque_features.npz --feature-key torque
 ```
 
-External feature shape handling:
 
-```text
-[T]       used directly as one scalar per frame
-[T, J]    reduced by mean absolute value over joints
-[T, J, D] reduced by vector norm, then mean over joints
-```
+## `latent_feature_probe.py`
 
-The external feature length must match the selected sequence length after
-`--start-frame`, `--end-frame`, and `--stride`.
+**Note: This is under testing.**
 
-### `latent_feature_probe.py`
-
-Probe model. It reads `latent_video_probe.npz` and tests whether latent codes can
-predict the selected feature:
+Regression probe for one `latent_video_probe.py` result. It tests whether the
+latent code can predict the selected per-frame feature:
 
 ```text
 latent z[t] -> feature[t]
 ```
 
-Run this before training a new torque-aware VPoser. It tells you whether the
-original latent space already contains the feature.
+Run this **before training a feature-aware VPoser**. If the original latent space
+already predicts the feature well, an auxiliary training target may be less
+necessary.
 
 ```powershell
 python -m human_body_prior.evaluations.latent_feature_probe `
   --input latent_probe\video_probe_walking_torque_proxy\latent_video_probe.npz `
   --model ridge `
-  --split-mode temporal
+  --split-mode temporal # "temporal", "random"
 ```
 
-Try the nonlinear probe (MLP):
+Try the nonlinear probe:
 
 ```powershell
 python -m human_body_prior.evaluations.latent_feature_probe `
@@ -147,38 +133,55 @@ prediction_scatter.png
 prediction_heldout.png
 ```
 
-## Interpreting Probe Metrics
+Important options:
 
-`r2`:
+- `--model ridge` checks whether the feature is linearly visible in latent
+  space.
+- `--model mlp` checks for a simple nonlinear relationship.
+- `--split-mode temporal` trains on earlier frames and tests on later frames.
+- `--split-mode random` is useful for quick checks, but can overestimate
+  performance when neighboring frames are very similar.
 
-- Near `1.0`: latent codes predict the feature well.
-- Around `0.0`: no better than predicting an average value.
-- Below `0.0`: worse than the average predictor.
+## `latent_category_probe.py`
 
-`baseline_mean`:
+**Category-level** latent plot for raw AMASS-style motion folders. It recursively
+finds `*_poses.npz` files, samples frames from each motion file, infers a motion
+category from the filename, and **colors latent points by category**.
 
-This is the metric for a trivial model that always predicts the training-set
-mean. The probe should beat this baseline to be meaningful.
+Use this to check whether static VPoser pose latents separate broad motion
+labels such as walking, running, jumping, or lifting.
 
-`ridge` vs `mlp`:
+```powershell
+python -m human_body_prior.evaluations.latent_category_probe `
+  --data-dir <AMASS_Dataset_Dir>
+  --6DOF False `
+  --method umap ` #"pca", "umap", "both"
+  --frames-per-file 30
+  --out-dir <DIR_NAME>
+```
 
-- Good ridge score: the feature is linearly visible in latent space.
-- Low ridge but better MLP: the feature may be present but nonlinear/entangled.
-- Low both: the feature is probably not strongly represented in original VPoser.
+Outputs:
 
-`--split-mode temporal`:
+```text
+latent_category_probe.npz
+latent_categories_<method>.png
+category_counts.csv
+category_counts.png
+```
 
-Recommended for video-style analysis. It trains on the first part of a sequence
-and tests on later frames.
+Useful options:
 
-`--split-mode random`:
+- `--frames-per-file` controls how many frames are sampled from each motion.
+- `--sample-mode even` spreads samples through each sequence. 
+- `--sample-mode random` samples random frames from each sequence.
+- `--category-regex` overrides the default filename-based category parser.
+- `--label-centroids` writes category labels near cluster centers.
 
-Useful for quick checks, but can overestimate performance because adjacent video
-frames are often very similar.
 
-## Experiment Workflow
+
+## Experiments we did before training a new VPoser
 
 1. Use `latent_video_probe.py` on one ordered AMASS/video-like sequence.
-2. Compare feature plots.
-3. Use `latent_feature_probe.py` to check if original VPoser latents predict the feature.
-4. If the targer feature is weakly predicted from original latents, train a modified VPoser for that feature
+2. Use `latent_feature_probe.py` to check whether VPoser latents predict the feature.
+3. Use `latent_category_probe.py` when the question is category separation across many files.
+4. If the target feature is weakly represented, train a modified VPoser for that feature.

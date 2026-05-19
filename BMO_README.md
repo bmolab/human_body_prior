@@ -2,14 +2,19 @@
 
 This note covers the current training workflow for the 6D VPoser model and the torque-proxy experiment.
 
-Run commands from the repository root:
+Briefly, the changes we made:
+-   The preprocessing was extended for balanced multi-dataset preparation, source metadata, and in-domain/cross-dataset evaluation splits.
+-   Updates the original VPoser workflow to use a continuous 6D rotation representation.
+-   Adds an exploratory torque-proxy target from AMASS motion sequences.
+-   Trains an optional auxiliary prediction head for that proxy.
+-   Adds latent-space analysis scripts for checking whether pose and effort-like features are visible in the learned representation.
 
 
 ## 1. Install
 
 Follow the main [`README.md`](README.md).
 
-If Python cannot find `human_body_prior`, run: `python setup.py develop`
+If you get an error saying it cannot find `human_body_prior`, run: `python setup.py develop`
 
 
 ## 2. Prepare Raw AMASS
@@ -19,8 +24,6 @@ Put raw AMASS motion files under:
 ```text
 AMASS\<DATASET_NAME>\...\*_poses.npz
 ```
-
-Each AMASS `.npz` file must contain `poses`.
 
 The preprocessing uses:
 
@@ -37,48 +40,30 @@ Training does not read raw AMASS `.npz` files directly. It reads prepared `.pt` 
 AMASS\DataSet\<PREPARED_DATASET_ID>
   train\pose_body.pt
   train\root_orient.pt
+  train\torque_proxy.pt
 
   vald\pose_body.pt
   vald\root_orient.pt
+  vald\torque_proxy.pt
 
   test\pose_body.pt
   test\root_orient.pt
+  test\torque_proxy.pt
 ```
 
-For torque-proxy training, preprocessing also writes:
+So you need to start with **setting up a config in `configs\data\`**. A sample config with a detailed explanation can be found here:
 
-```text
-train\torque_proxy.pt
-vald\torque_proxy.pt
-test\torque_proxy.pt
-```
+- The dataset split is controlled by the `splits` section. 
+- If the config lists the same source datasets under `train`, `vald`, and `test`, and enables `split_sequences_by_source`: the preprocessing step then assigns whole source sequences to exactly one in-domain split using the `sequence_split_ratios` ratio, so neighboring frames from the same sequence do not leak across train/validation/test. 
+- The **optional** `preprocessing` section keeps torque-proxy training more stable across AMASS sources. It handles outliers (filters non-finite/extreme frames), compresses long-tailed values, and caps frames per sequence/dataset so very large subsets do not dominate.
 
-Use a config in `configs\data\` with:
-
-```yaml
-amass_dir: AMASS
-include_torque_proxy: true
-out_dir: AMASS/DataSet/<PREPARED_DATASET_ID>
-log_name: prepare.log
-
-splits:
-  train:
-    - <TRAIN_DATASET_NAME>
-  vald:
-    - <VALIDATION_DATASET_NAME>
-  test:
-    - <TEST_DATASET_NAME>
-```
-
-The split membership is controlled by the `splits` section. If the same AMASS subset is listed under train, validation, and test, that subset is sampled separately for all three splits.
 
 **Run preprocessing**:
 
 ```powershell
-python amass_data_prep.py --config configs\data\amass_vposer_example.yaml
+python amass_data_prep.py --config configs\data\amass_vposer_in_domain_cross_sample.yaml
 ```
 
-If prepared split folders already exist in `out_dir`, the script asks whether to clean `train`, `vald`, and `test` before rebuilding. After preprocessing, it prints frame counts, percentages, and tensor shapes for each split.
 
 **Validate the prepared dataset**:
 
@@ -92,6 +77,20 @@ Expected result:
 - all `finite` is `True`
 - `nan_count` is `0`
 - `inf_count` is `0`
+
+
+Prepared datasets include source metadata like:
+
+```text
+train\source_dataset.pt
+train\source_sequence.pt
+source_dataset_names.json
+source_sequence_names.json
+```
+
+**Note**: When `source_dataset.pt` is present, training logs **validation metrics** both in aggregate and per source dataset, e.g. `vald/CMU/loss_total` and `vald/KIT/loss_total`.
+
+
 
 ## 4. Training
 
@@ -108,56 +107,24 @@ Training experiments live under:
 src\human_body_prior\train\<EXPERIMENT_FOLDER>
 ```
 
-Each experiment has:
+Each experiment must have:
 
-```text
-<EXPERIMENT_NAME>.py
-<EXPERIMENT_NAME>.yaml
+```python
+<EXPERIMENT_NAME>.py # the command-line entry point
+<EXPERIMENT_NAME>.yaml # stores the default model, data, and training settings.
 ```
 
-The `.py` file is the command-line entry point. The `.yaml` file stores the default model, data, and training settings.
-
-### Baseline 6D VPoser
-
-Run baseline 6D training:
-
-```powershell
-python -m human_body_prior.train.V02_08_6D.V02_08_6D `
-  --dataset-dir AMASS\DataSet\<PREPARED_DATASET_ID> `
-  --expr-id <EXPR_ID> `
-  --num-epochs 30 `
-  --batch-size 32 `
-  --num-workers 0 `
-  --lr 0.0001 `
-  --gradient-clip-val 1.0 `
-  --bm-fname <BODY_MODEL_PATH>
-```
 
 ### Torque-Proxy VPoser
 
 Use a dataset prepared with `include_torque_proxy: true`.
 
-Run torque-proxy training:
+Sample command that runs torque-proxy training:
 
 ```powershell
 python -m human_body_prior.train.V02_08_6D_torque_proxy.V02_08_6D_torque_proxy `
   --dataset-dir AMASS\DataSet\<PREPARED_DATASET_ID> `
   --expr-id <EXPR_ID> `
-  --num-epochs 30 `
-  --batch-size 32 `
-  --num-workers 0 `
-  --lr 0.0001 `
-  --gradient-clip-val 1.0 `
-  --bm-fname <BODY_MODEL_PATH>
-```
-
-The torque loss weight can be overridden from the command line:
-
-```powershell
-python -m human_body_prior.train.V02_08_6D_torque_proxy.V02_08_6D_torque_proxy `
-  --dataset-dir AMASS\DataSet\<PREPARED_DATASET_ID> `
-  --expr-id <EXPR_ID> `
-  --loss-torque-proxy-wt 0.01 `
   --bm-fname <BODY_MODEL_PATH>
 ```
 
@@ -175,16 +142,30 @@ Monitor TensorBoard:
 tensorboard --logdir support_data\training\training_experiments\<EXPR_ID>\tensorboard
 ```
 
-Regenerate the static loss plot:
+### Post-Training Analysis
 
-```powershell
-python -m human_body_prior.tools.loss_history `
-  support_data\training\training_experiments\<EXPR_ID>\loss_history.csv
+Training performance is mainly evaluated from saved loss history and checkpoints.
+
+Collected during training:
+
+- `val_loss`: the validation `loss_total`, used by early stopping and checkpoint names.
+- `train/loss_kl`, `train/matrot`, `train/jtr`, `train/loss_total`
+- `vald/loss_kl`, `vald/matrot`, `vald/jtr`, `vald/loss_total`
+- `train/torque_proxy` and `vald/torque_proxy` when torque-proxy supervision is enabled.
+
+These values are saved in:
+
+```text
+loss_history.csv
+loss_history.png
+tensorboard\version_*
 ```
+
+**For best model selection, we currently use the checkpoint with the lowest validation loss**. The selected path is also written to the training log as `best_model_fname`.
 
 ### Key Changes From Original VPoser
 
-The original VPoser encoder reads axis-angle pose:
+**The original VPoser** encoder reads axis-angle pose:
 
 ```text
 21 joints * 3 axis-angle values = 63 values
@@ -214,11 +195,7 @@ The decoder still reconstructs pose only. It does not output torque.
 
 ### Loss Function Used During Training
 
-The loss is implemented in:
-
-```text
-src\human_body_prior\train\vposer_trainer.py
-```
+Find the loss change in: ` src\human_body_prior\train\vposer_trainer.py`
 
 #### Baseline 6D VPoser
 
@@ -234,9 +211,7 @@ Terms:
 - `matrot`: compares reconstructed joint rotations with original rotations.
 - `jtr`: compares reconstructed body joints with original body joints after SMPL-X forward kinematics.
 
-Current behavior:
-
-- `loss_kl` is always included.
+Notes:
 - `matrot` and `jtr` are included while `current_epoch < keep_extra_loss_terms_until_epoch`.
 - `loss_rec_wt` remains in the config, but mesh reconstruction loss is commented out.
 
@@ -252,15 +227,15 @@ train_parms:
     loss_jtr_wt: 2
 ```
 
-#### Torque-Proxy Experiment
+#### **New Torque-Proxy Experiment**
 
-The torque-proxy model keeps the baseline pose autoencoder loss and adds:
+The torque-proxy model keeps the baseline pose autoencoder loss and adds an auxiliary proxy loss:
 
 ```text
-torque_proxy = loss_torque_proxy_wt * L1(predicted_torque_proxy, target_torque_proxy)
+torque_proxy = loss_torque_proxy_wt * SmoothL1(predicted_torque_proxy, target_torque_proxy)
 ```
 
-`target_torque_proxy` is computed from the raw temporal AMASS sequence before random frame sampling. It is an effort-like placeholder based on pose magnitude, pose speed, and pose acceleration.
+`target_torque_proxy` is computed during preprocessing, from the raw temporal AMASS sequence before random frame sampling. It is an effort-like placeholder based on pose magnitude, pose speed, and pose acceleration.
 
 With torque supervision enabled:
 
@@ -273,13 +248,13 @@ Relevant config:
 ```yaml
 train_parms:
   torque_proxy_normalize: True
+  torque_proxy_normalization: <NORMALIZATION_MODE>
+  torque_proxy_loss: <TORQUE_LOSS_TYPE>
   loss_weights:
-    loss_torque_proxy_wt: 0.01
+    loss_torque_proxy_wt: <LOSS_WEIGHT>
 ```
 
-`torque_proxy_normalize: True` normalizes target torque-proxy values using the training split mean and standard deviation before the L1 loss.
-
-## 5. Troubleshooting
+## Notes for Troubleshooting
 
 If training gives NaN or infinite losses, validate the prepared dataset:
 
