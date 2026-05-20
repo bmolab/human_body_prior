@@ -45,6 +45,7 @@ from human_body_prior.data.dataloader import VPoserDS
 from human_body_prior.data.prepare_data import dataset_exists
 from human_body_prior.data.prepare_data import prepare_vposer_datasets
 from human_body_prior.models.vposer_model import VPoser
+from human_body_prior.models.vposer_decoder_aux_model import VPoserDecoderTorqueProxy
 from human_body_prior.models.vposer_torque_model import VPoserTorqueProxy
 from human_body_prior.tools.angle_continuous_repres import geodesic_loss_R
 from human_body_prior.tools.configurations import load_config, dump_config
@@ -115,7 +116,7 @@ class VPoserTrainer(LightningModule):
         self.register_buffer('torque_proxy_mean', torch.zeros(1))
         self.register_buffer('torque_proxy_std', torch.ones(1))
 
-        vp_model_class = VPoserTorqueProxy if self.use_torque_proxy else VPoser
+        vp_model_class = self._select_vposer_model_class(vp_ps)
         self.vp_model = vp_model_class(vp_ps)
 
         with torch.no_grad():
@@ -137,6 +138,23 @@ class VPoserTrainer(LightningModule):
     def _uses_torque_proxy(vp_ps):
         loss_weights = vp_ps.train_parms.loss_weights.toDict()
         return float(loss_weights.get('loss_torque_proxy_wt', 0.0)) > 0.0
+
+    def _select_vposer_model_class(self, vp_ps):
+        if not self.use_torque_proxy:
+            return VPoser
+
+        # Select where the auxiliary torque_proxy prediction head is attached.
+        head_source = str(vp_ps.model_params.toDict().get('torque_proxy_head_source', 'latent')).lower()
+        if head_source == 'latent':
+            return VPoserTorqueProxy
+        if head_source == 'decoder':
+            return VPoserDecoderTorqueProxy
+
+        raise ValueError(
+            "Unknown torque_proxy_head_source '{}'. Expected 'latent' or 'decoder'.".format(
+                head_source
+            )
+        )
 
     def _load_source_dataset_names(self):
         source_names_fname = osp.join(self.dataset_dir, 'source_dataset_names.json')
