@@ -1,0 +1,67 @@
+body_model:
+  bm_fname: /Users/bmolab/Dev/human_body_prior/support_data/dowloads/models/smplx/neutral/model.npz
+  gender: neutral
+data_parms:
+  amass_dir: ../../../../AMASS
+  amass_splits:
+    test:
+    - Transitions
+    train:
+    - KIT
+    - ACCAD
+    vald:
+    - HumanEva
+  num_timeseq_frames: 1
+  num_workers: 0
+general:
+  dataset_basedir: /Users/bmolab/Dev/human_body_prior/AMASS_Processed/DataSet
+  dataset_id: amass_inDomain_cross_torque_full_2
+  expr_id: new_dataSplit_torque_test_full_weight0.01
+  rnd_seed: 100
+  verbosity: 0
+  work_basedir: /Users/bmolab/Dev/human_body_prior/support_data/training/training_experiments
+logging:
+  best_model_fname: null
+  dataset_dir: /Users/bmolab/Dev/human_body_prior/AMASS_Processed/DataSet/amass_inDomain_cross_torque_full_2
+  expr_msg: '[new_dataSplit_torque_test_full_weight0.01] batch_size = 64.'
+  num_bodies_to_display: 25
+  render_during_training: false
+  work_dir: /Users/bmolab/Dev/human_body_prior/support_data/training/training_experiments/new_dataSplit_torque_test_full_weight0.01
+model_params:
+  latentD: 32
+  num_neurons: 512
+  torque_proxy_head:
+    dropout: 0.1
+    hiddenD: 64
+train_parms:
+  batch_size: 64
+  early_stopping:
+    min_delta: 0.001
+    mode: min
+    monitor: val_loss
+    patience: 10
+    verbose: true
+  gen_optimizer:
+    args:
+      lr: 0.0001
+      weight_decay: 1.0e-05
+    type: Adam
+  gradient_clip_val: 1.0
+  keep_extra_loss_terms_until_epoch: 50
+  loss_weights:
+    loss_jtr_wt: 2
+    loss_kl_wt: 0.005
+    loss_matrot_wt: 2
+    loss_rec_wt: 4
+    loss_torque_proxy_wt: 0.01
+  lr_scheduler:
+    args:
+      patience: 3
+      verbose: true
+    type: ReduceLROnPlateau
+  num_epochs: 80
+  restore_optimizer: false
+  torque_proxy_loss: smooth_l1
+  torque_proxy_normalization: robust
+  torque_proxy_normalize: true
+  torque_proxy_smooth_l1_beta: 1.0
