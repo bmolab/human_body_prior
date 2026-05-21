@@ -60,7 +60,7 @@ splits:
     - SFU
 
   # In-domain validation datasets. These can be different from `train`.
-  # The trainer uses `vald` for early stopping and checkpoint selection
+  # The trainer uses vald for early stopping and checkpoint selection
   vald:
     - TotalCapture
     - SFU
