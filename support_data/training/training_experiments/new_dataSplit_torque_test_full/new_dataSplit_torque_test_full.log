@@ -1,0 +1,6 @@
+[new_dataSplit_torque_test_full] -- VPoser dataset already exists at /Users/bmolab/Dev/human_body_prior/AMASS_Processed/DataSet/amass_inDomain_cross_torque_full_2
+[new_dataSplit_torque_test_full] -- Total Trainable Parameters Count in vp_model is 0.97 M.
+[new_dataSplit_torque_test_full] -- Created a git archive backup at /Users/bmolab/Dev/human_body_prior/support_data/training/training_experiments/new_dataSplit_torque_test_full/code/vposer_2026_05_11_16_56_15.tar.gz
+[new_dataSplit_torque_test_full] -- Epoch 43 - Finished training at 2026_05_12_06_46_27 after 13:50:12
+[new_dataSplit_torque_test_full] -- best_model_fname: /Users/bmolab/Dev/human_body_prior/support_data/training/training_experiments/new_dataSplit_torque_test_full/snapshots/new_dataSplit_torque_test_full_epoch=42_val_loss=0.37.ckpt
+[new_dataSplit_torque_test_full] -- loss_history_plot: /Users/bmolab/Dev/human_body_prior/support_data/training/training_experiments/new_dataSplit_torque_test_full/loss_history.png
