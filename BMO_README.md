@@ -1,6 +1,6 @@
 # Modified VPoser Training Workflow
 
-This note covers the current end-to-end workflow for the modified VPoser training pipeline. It focuses on the framework changes and the commands needed to run the pipeline, not on covering every experiment variant. For more development-related details (e.g. what we experimented with), please check [DevNotes](https://github.com/bmolab/knowledge-share-docs/blob/main/human_body_prior/Dev_Notes_202605.md).
+This note covers the current end-to-end workflow for the modified VPoser training pipeline. It focuses on the framework changes and the commands needed to run the pipeline, not every experiment variant. For more development-related details (e.g. what we experimented with), please check [DevNotes](https://github.com/bmolab/knowledge-share-docs/blob/main/human_body_prior/Dev_Notes_202605.md).
 
 High-level changes:
 - The main VPoser implementation now encodes poses through a continuous 6D rotation representation.
@@ -34,16 +34,14 @@ pose_body   = poses[:, 3:66]
 
 ## 3. Preprocess AMASS
 
-Training does not read raw AMASS `.npz` files directly now. So you need to start with **setting up a config in `configs\data\`**. A sample config with detailed comments is available at [`configs\data\amass_vposer_in_domain_cross_sample.yaml`](configs/data/amass_vposer_in_domain_cross_sample.yaml).
+Training does not read raw AMASS `.npz` files directly. Start by setting up a preprocessing config in `configs\data\`. A sample config with detailed comments is available at [`configs\data\amass_vposer_in_domain_cross_sample.yaml`](configs/data/amass_vposer_in_domain_cross_sample.yaml).
 
 
 The important settings in the config file are:
-- Prepared datasets are written under the `out_dir`
-- `splits`: split datasets into `train`, `vald`, `test`, and optional held-out splits such as `vald_cross` and `test_cross`. 
-  - If the same AMASS source appears under `train`, `vald`, and `test`, enable `split_sequences_by_source` so entire source sequences are assigned to one in-domain split. This avoids neighboring frames from the same sequence leaking across train/validation/test.
-  - `vald_cross` and `test_cross` can be prepared for held-out dataset checks, but the trainer uses `vald` for early stopping and checkpoint selection.
+- Prepared datasets are written under `out_dir`.
+- `splits`: split datasets into `train`, `vald`, `test`, and optional held-out splits such as `vald_cross` and `test_cross`. If the same AMASS source appears under `train`, `vald`, and `test`, enable `split_sequences_by_source` so entire source sequences are assigned to one in-domain split. This avoids neighboring frames from the same sequence leaking across train/validation/test. `vald_cross` and `test_cross` can be prepared for held-out dataset checks, but the trainer uses `vald` for early stopping and checkpoint selection.
 - `include_torque_proxy`: writes `torque_proxy.pt` for torque-proxy training.
-- `preprocessing`: optional, it keeps torque-proxy training more stable across AMASS sources. It handles outliers (filters non-finite/extreme frames), compresses long-tailed values, and caps frames per sequence/dataset so very large subsets do not dominate.
+- `preprocessing`: optional section that keeps torque-proxy training more stable across AMASS sources. It handles outliers (filters non-finite/extreme frames), compresses long-tailed values, and caps frames per sequence/dataset so very large subsets do not dominate.
 
 
 
@@ -164,10 +162,10 @@ The baseline VPoser-style training objective uses KL regularization plus pose re
 loss_total = loss_kl + matrot + jtr
 ```
 
-For torque-proxy training, wee add a weighted auxiliary proxy loss:
+For torque-proxy training, we add a weighted auxiliary proxy loss:
 
 ```text
-loss_total = loss_kl + matrot + jtr + torque_proxy
+loss_total = loss_kl + matrot + jtr + loss_torque_proxy_wt * torque_proxy_loss
 ```
 
 Terms:
@@ -175,14 +173,14 @@ Terms:
 - `loss_kl`: keeps the latent distribution close to `N(0, I)`.
 - `matrot`: compares reconstructed joint rotations with original rotations.
 - `jtr`: compares reconstructed body joints with original body joints after SMPL-X forward kinematics.
-- `torque_proxy`: compares the predicted scalar with the preprocessed exploratory torque-proxy target.
+- `torque_proxy_loss`: compares the predicted scalar with the preprocessed exploratory torque-proxy target. The logged `torque_proxy` value is already weighted by `loss_torque_proxy_wt`.
 
 Notes:
 
 - `matrot` and `jtr` are included while `current_epoch < keep_extra_loss_terms_until_epoch`.
-- `loss_rec_wt` remains in the config but we are not actually using it. 
+- `loss_rec_wt` remains in the config, but mesh reconstruction loss is currently disabled/commented out.
 
-- The proxy loss compares the model's predicted scalar with the preprocessed `torque_proxy.pt` target. The trainer supports proxy normalization and robust loss options through config. See `human_body_prior\train\vposer_trainer.py` for the implementation details.
+The trainer supports proxy normalization and robust loss options through config. See `human_body_prior\train\vposer_trainer.py` for the implementation details.
 
 
 ## 6. Evaluation Probes
