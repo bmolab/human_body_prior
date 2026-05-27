@@ -1,0 +1,73 @@
+body_model:
+  gender: neutral
+  bm_fname: ../../../../support_data/dowloads/models/smplx/neutral/model.npz
+
+general:
+  verbosity: 0
+  expr_id:
+  dataset_id: amass_with_torque_small
+  rnd_seed: 100
+  work_basedir: ../../../../support_data/training/training_experiments
+  dataset_basedir: ../../../../AMASS_processed/DataSet
+
+logging:
+  expr_msg:
+  num_bodies_to_display: 25
+  work_dir:
+  dataset_dir:
+  render_during_training: False
+  best_model_fname:
+
+train_parms:
+  batch_size: 64
+  num_epochs: 80
+  restore_optimizer: False
+  gen_optimizer:
+    type: Adam
+    args:
+      lr: 0.0001
+      weight_decay: 0.00001
+  gradient_clip_val: 1.0
+  lr_scheduler:
+    type: ReduceLROnPlateau
+    args:
+      verbose: true
+      patience: 3
+  early_stopping:
+    monitor: val_loss
+    min_delta: 0.001
+    patience: 10
+    verbose: True
+    mode: min
+  keep_extra_loss_terms_until_epoch: 50
+  torque_proxy_normalize: True
+  torque_proxy_normalization: robust
+  torque_proxy_loss: smooth_l1
+  torque_proxy_smooth_l1_beta: 1.0
+  loss_weights:
+    loss_kl_wt: 0.005
+    loss_rec_wt: 4
+    loss_matrot_wt: 2
+    loss_jtr_wt: 2
+    loss_torque_proxy_wt: 0.005
+
+data_parms:
+  num_workers: 5
+  amass_dir: ../../../../AMASS
+  num_timeseq_frames: 1
+  amass_splits:
+    train:
+      - KIT
+      - ACCAD
+    vald:
+      - HumanEva
+    test:
+      - Transitions
+
+model_params:
+  num_neurons: 512
+  latentD: 32
+  torque_proxy_head_source: decoder
+  torque_proxy_head:
+    hiddenD: 64
+    dropout: 0.1

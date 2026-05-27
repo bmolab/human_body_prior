@@ -51,40 +51,24 @@ def flatten_list(l):
     return [item for sublist in l for item in sublist]
 
 
-SUPPORT_DATA_ENV = 'HUMAN_BODY_PRIOR_SUPPORT_DATA'
-
-
 def get_support_data_dir(current_fname=__file__):
-    """Return the absolute path to the packaged support_data directory.
+    current_dir = osp.dirname(osp.abspath(current_fname))
+    search_dir = current_dir
 
-    The lookup works for both editable installs (repo checkouts) and wheels
-    installed into site-packages. Set the HUMAN_BODY_PRIOR_SUPPORT_DATA
-    environment variable to override the auto detection (helpful on Windows
-    when data lives outside the Python environment).
-    """
-    env_override = os.environ.get(SUPPORT_DATA_ENV)
-    if env_override:
-        env_path = Path(env_override).expanduser()
-        if env_path.is_dir():
-            return str(env_path.resolve())
-        raise FileNotFoundError(
-            f'{SUPPORT_DATA_ENV}={env_path} does not exist. '
-            f'Update the environment variable or place support_data next to the package.'
-        )
+    while True:
+        candidate = osp.join(search_dir, 'support_data')
+        if osp.exists(candidate):
+            support_data_dir = candidate
+            break
 
-    current_path = Path(current_fname).resolve()
-    for parent in current_path.parents:
-        if parent.name == 'support_data' and parent.is_dir():
-            return str(parent)
-        candidate = parent / 'support_data'
-        if candidate.is_dir():
-            return str(candidate)
+        parent = osp.dirname(search_dir)
+        if parent == search_dir:
+            support_data_dir = candidate
+            break
+        search_dir = parent
 
-    raise FileNotFoundError(
-        "Could not locate the 'support_data' directory. "
-        "Place it next to the human_body_prior package or set "
-        f'the {SUPPORT_DATA_ENV} environment variable.'
-    )
+    assert osp.exists(support_data_dir)
+    return support_data_dir
 
 
 def make_deterministic(seed):

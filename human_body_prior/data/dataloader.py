@@ -36,7 +36,10 @@ class VPoserDS(Dataset):
         for data_fname in glob.glob(os.path.join(dataset_dir, '*.pt')):
             k = os.path.basename(data_fname).replace('.pt','')
             if len(data_fields) != 0 and k not in data_fields: continue
-            self.ds[k] = torch.load(data_fname).type(torch.float32)
+            data = torch.load(data_fname)
+            if data.is_floating_point():
+                data = data.type(torch.float32)
+            self.ds[k] = data
 
         dataset_ps_fname = glob.glob(os.path.join(dataset_dir, '..', '*.ini'))
         if len(dataset_ps_fname):

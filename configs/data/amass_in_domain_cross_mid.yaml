@@ -1,0 +1,52 @@
+# Prepare AMASS for both stable in-domain training diagnostics and
+# held-out cross-dataset generalization checks.
+#
+# `train`, `vald`, and `test` intentionally list the same source datasets.
+# With `split_sequences_by_source: true`, preprocessing assigns each source
+# sequence to exactly one of those splits using the ratios below.
+#
+# `vald_cross` and `test_cross` are extra evaluation-only splits. The trainer
+# still uses `vald` for early stopping and checkpoint selection.
+
+amass_dir: AMASS
+include_torque_proxy: true
+out_dir: AMASS_Processed/DataSet/amass_inDomain_cross_torque_mid_2
+log_name: prepare.log
+
+preprocessing:
+  keep_rate: 0.3
+  max_frames_per_sequence: 500
+  max_frames_per_dataset: 55000
+  torque_proxy_use_fps: true
+  torque_proxy_log1p: true
+  torque_proxy_filter_percentile: 99.5
+  save_source_metadata: true
+  split_sequences_by_source: true
+  sequence_split_seed: 100
+  sequence_split_ratios:
+    train: 0.9
+    vald: 0.05
+    test: 0.05
+
+splits:
+  train:
+    - TotalCapture
+    - MPILimits
+    - SFU
+    - ACCAD
+  vald:
+    - TotalCapture
+    - MPILimits
+    - SFU
+    - ACCAD
+  test:
+    - TotalCapture
+    - MPILimits
+    - SFU
+    - ACCAD
+
+  vald_cross:
+    - HumanEva
+    - MPImosh
+  test_cross:
+    - Transitions

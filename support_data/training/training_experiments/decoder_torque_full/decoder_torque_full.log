@@ -1,0 +1,6 @@
+[decoder_torque_full] -- VPoser dataset already exists at /Users/bmolab/Dev/human_body_prior/AMASS_Processed/DataSet/amass_inDomain_cross_torque_full_2
+[decoder_torque_full] -- Total Trainable Parameters Count in vp_model is 1.00 M.
+[decoder_torque_full] -- Created a git archive backup at /Users/bmolab/Dev/human_body_prior/support_data/training/training_experiments/decoder_torque_full/code/vposer_2026_05_20_16_27_17.tar.gz
+[decoder_torque_full] -- Epoch 32 - Finished training at 2026_05_21_03_30_21 after 11:03:04
+[decoder_torque_full] -- best_model_fname: /Users/bmolab/Dev/human_body_prior/support_data/training/training_experiments/decoder_torque_full/snapshots/decoder_torque_full_epoch=31_val_loss=0.37.ckpt
+[decoder_torque_full] -- loss_history_plot: /Users/bmolab/Dev/human_body_prior/support_data/training/training_experiments/decoder_torque_full/loss_history.png

@@ -34,9 +34,8 @@ def exprdir2model(expr_dir, model_cfg_override: dict = None):
     assert len(available_ckpts) > 0, ValueError('No checkpoint found at {}'.format(model_snapshots_dir))
     trained_weights_fname = available_ckpts[-1]
 
-    model_cfg_fname = glob.glob(osp.join('/', '/'.join(trained_weights_fname.split('/')[:-2]), '*.yaml'))
-    if len(model_cfg_fname) == 0:
-        model_cfg_fname = glob.glob(osp.join('/'.join(trained_weights_fname.split('/')[:-2]), '*.yaml'))
+    expr_root = osp.dirname(osp.dirname(trained_weights_fname))
+    model_cfg_fname = glob.glob(osp.join(expr_root, '*.yaml'))
 
     model_cfg_fname = model_cfg_fname[0]
     model_cfg = OmegaConf.load(model_cfg_fname)
