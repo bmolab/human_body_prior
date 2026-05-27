@@ -35,7 +35,7 @@ train_parms:
       verbose: true
       patience: 5
   early_stopping:
-    monitor: lr-Adam
+    monitor: val_loss
     min_delta: 0.0
     patience: 10
     verbose: True
